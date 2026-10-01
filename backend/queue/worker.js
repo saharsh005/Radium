@@ -1,4 +1,5 @@
 import dotenv from "dotenv";
+import "dotenv/config";
 import path from "path";
 import { fileURLToPath } from "url";
 
@@ -8,17 +9,23 @@ dotenv.config({ path: path.join(__dirname, "../.env") });
 
 import { Worker } from "bullmq";
 import pdf from "pdf-parse/lib/pdf-parse.js";
-import { v4 as uuidv4 } from "uuid";
 import Groq from "groq-sdk";
 import { getEmbedding } from "../utils/embeddings.js";
-import { supabase } from "../utils/supabase.js";
-import { buildGapsPrompt } from "../rag/prompts.js";
+import { deterministicChunkId } from "../utils/ids.js";
 import { createRedisConnection } from "./redisConnection.js";
 import { createQdrantClient } from "../utils/qdrant.js";
+import { chunkDocument, normaliseText } from "../rag/chunker.js";
+import { sampleExcerpts, parseGapResponse, gapFilenames } from "../rag/gaps.js";
+import { supabase } from "../utils/supabase.js";
+import { buildGapsPrompt } from "../rag/prompts.js";
 
 // ─── Config ───────────────────────────────────────────────
+// Shared Redis options: supports REDIS_URL / rediss TLS (Upstash) as well
+// as plain REDIS_HOST/REDIS_PORT. maxRetriesPerRequest stays null for
+// BullMQ's blocking commands.
 const REDIS_CONNECTION = createRedisConnection();
 
+const QDRANT_URL  = process.env.QDRANT_URL || "http://localhost:6333";
 const VECTOR_SIZE = 384;
 
 let ai = null;
@@ -42,39 +49,18 @@ async function generateAndStoreResearchGaps(workspaceId) {
     return;
   }
  
-  // ── Token-budget-aware sampling ──────────────────────────────────────────
-  // Groq free tier: 12,000 TPM hard limit
-  // Prompt template ≈ 500 tokens, output reserve = 2,000 tokens
-  // Remaining for context ≈ 9,500 tokens ÷ 4 chars/token ≈ 3,800 chars
-  // Using 1,600 chars to stay well within limit with safety margin
-  const SAMPLE_COUNT = 8;    // ↓ from 20
-  const EXCERPT_LEN  = 150;  // ↓ from 400 chars per chunk
-  const MAX_CONTEXT  = 1600; // ↓ from 8000
- 
-  const step    = Math.max(1, Math.floor(allChunks.length / SAMPLE_COUNT));
-  const sampled = [];
-  for (let i = 0; i < allChunks.length && sampled.length < SAMPLE_COUNT; i += step) {
-    sampled.push(allChunks[i]);
+  // Provenance-labelled sampling (rag/gaps.js): each excerpt carries its
+  // reference ID, file, page and section. Budget stays token-safe for the
+  // Groq tier (≈1,600 chars of context).
+  const { excerpts, contextText } = sampleExcerpts(allChunks);
+  if (!excerpts.length) {
+    console.log(`ℹ️  No usable excerpts for workspace ${workspaceId}, skipping gap generation.`);
+    return;
   }
-  // Include last chunk for conclusion coverage
-  if (allChunks.length > 1) {
-    const last = allChunks[allChunks.length - 1];
-    if (!sampled.find(c => c.id === last.id)) sampled.push(last);
-  }
- 
-  let combinedText = "";
-  for (const c of sampled) {
-    const section = c.payload.section ? `[${c.payload.section}]` : "[Excerpt]";
-    const text    = (c.payload.text || "").slice(0, EXCERPT_LEN).replace(/\s+/g, " ").trim();
-    const excerpt = `${section}\n${text}\n\n---\n\n`;
-    if (combinedText.length + excerpt.length > MAX_CONTEXT) break;
-    combinedText += excerpt;
-  }
-  combinedText = combinedText.trim();
- 
-  console.log(`📊 Sending ${sampled.length} excerpts (${combinedText.length} chars / ~${Math.ceil(combinedText.length / 4)} tokens) to LLM`);
- 
-  const prompt = buildGapsPrompt(combinedText);
+
+  console.log(`📊 Sending ${excerpts.length} excerpts (${contextText.length} chars / ~${Math.ceil(contextText.length / 4)} tokens) to LLM`);
+
+  const prompt = buildGapsPrompt(contextText);
  
   const completion = await getAi().chat.completions.create({
     model:           "llama-3.3-70b-versatile",
@@ -91,56 +77,70 @@ async function generateAndStoreResearchGaps(workspaceId) {
     catch (parseErr) { console.warn("Research gaps parse error:", parseErr); }
   }
  
-  const gaps = Array.isArray(parsed.gaps) ? parsed.gaps : [];
+  // Evidence resolution: only gaps whose references resolve to real
+  // sampled excerpts survive. Confidence = resolved/claimed (measured).
+  const gaps = parseGapResponse(parsed, excerpts);
   if (!gaps.length) {
-    console.log(`ℹ️  No structured gaps returned for workspace ${workspaceId}.`);
+    console.log(`ℹ️  No evidence-backed gaps for workspace ${workspaceId} (LLM output had no resolvable evidence).`);
     return;
   }
- 
-  // Collect source PDF names
-  const pdfIds = new Set(allChunks.map(c => c.payload.pdfId).filter(Boolean));
-  let relatedPdfs = [];
-  if (pdfIds.size > 0) {
-    const { data: pdfData } = await supabase
-      .from("user_pdfs")
-      .select("pdf_id, filename")
-      .in("pdf_id", Array.from(pdfIds));
-    relatedPdfs = (pdfData || []).slice(0, 3).map(p => p.filename || p.pdf_id);
-  }
- 
-  const records = gaps.map((gap, index) => ({
+
+  // Source PDFs are the ones actually referenced — never a blind first-3.
+  const relatedPdfs = gapFilenames(gaps);
+
+  const records = gaps.map((gap) => ({
     workspace_id: workspaceId,
-    gap_text: [
-      (gap.title?.trim()       || `Research Gap ${index + 1}`),
-      (gap.description?.trim() || ""),
-    ].filter(Boolean).join("\n\n"),
-    gap_type:     gap.type?.trim() || "RESEARCH GAP",
-    confidence:   0,
+    gap_text: [gap.title, gap.description].filter(Boolean).join("\n\n"),
+    gap_type:     gap.type,
+    confidence:   gap.confidence,
     related_pdfs: relatedPdfs,
+    evidence:     gap.evidence, // needs migration 002; dropped on older schemas
   }));
- 
+
   const { error: deleteErr } = await supabase
     .from("research_gaps")
     .delete()
     .eq("workspace_id", workspaceId);
   if (deleteErr) console.warn("Could not clear previous research gaps:", deleteErr.message);
- 
-  const { error: insertErr } = await supabase
-    .from("research_gaps")
-    .insert(records);
+
+  let { error: insertErr } = await supabase.from("research_gaps").insert(records);
+  if (insertErr && /column|evidence/i.test(insertErr.message ?? "")) {
+    // Pre-migration schema: retry without the evidence column.
+    const legacy = records.map(({ evidence: _dropped, ...row }) => row);
+    ({ error: insertErr } = await supabase.from("research_gaps").insert(legacy));
+  }
   if (insertErr) console.warn("Could not store research gaps:", insertErr.message);
-  else console.log(`✅ Stored ${records.length} research gaps for workspace ${workspaceId}`);
+  else console.log(`✅ Stored ${records.length} evidence-backed gaps for workspace ${workspaceId}`);
 }
  
 
-const CHUNK_TARGET  = 800;
-const CHUNK_MIN     = 250;
-const CHUNK_MAX     = 1100;
-const CHUNK_OVERLAP = 150;
 const BATCH_SIZE    = 15;
+// Embedding concurrency: the local transformer model runs on CPU, so a
+// small pool beats sequential awaits without thrashing the event loop.
+const EMBED_CONCURRENCY = 5;
 
 const sleep  = (ms) => new Promise((res) => setTimeout(res, ms));
+// Shared client: picks up QDRANT_URL + QDRANT_API_KEY and skips the
+// version check (Qdrant Cloud needs the key on every request).
 const qdrant = createQdrantClient({ timeout: 60_000 });
+
+// Embed a batch with bounded concurrency. Failures propagate — the caller
+// retries the whole batch (Qdrant upsert never sees partial vectors).
+async function embedBatch(texts) {
+  const out = new Array(texts.length);
+  let cursor = 0;
+  const runners = Array.from(
+    { length: Math.min(EMBED_CONCURRENCY, texts.length) },
+    async () => {
+      while (cursor < texts.length) {
+        const i = cursor++;
+        out[i] = await getEmbedding(texts[i]);
+      }
+    }
+  );
+  await Promise.all(runners);
+  return out;
+}
 
 // ─── Qdrant Collection Setup ──────────────────────────────
 /**
@@ -155,27 +155,37 @@ const qdrant = createQdrantClient({ timeout: 60_000 });
  */
 async function ensureCollection(name) {
   try {
-    await qdrant.createCollection(name, {
-      vectors: { size: VECTOR_SIZE, distance: "Cosine" },
-    });
-    console.log("✅ Created collection:", name);
-
-    await qdrant.createPayloadIndex(name, {
-      field_name:   "workspaceId",
-      field_schema: "keyword",
-    });
-    await qdrant.createPayloadIndex(name, {
-      field_name:   "pdfId",
-      field_schema: "keyword",
-    });
-    console.log("✅ Payload indices created (workspaceId, pdfId)");
-  } catch (err) {
-    if (err.status === 409) {
-      console.log("ℹ️  Collection already exists:", name);
-    } else {
-      throw err;
+    const info = await qdrant.getCollection(name);
+    const size = info?.config?.params?.vectors?.size;
+    if (size && size !== VECTOR_SIZE) {
+      throw new Error(
+        `Qdrant collection "${name}" uses vector size ${size} but the embedding model produces ${VECTOR_SIZE}. ` +
+        `Delete or migrate the collection before re-indexing.`
+      );
     }
+    console.log("ℹ️  Collection already exists:", name);
+    return;
+  } catch (err) {
+    // Our own size-mismatch error must propagate, never be treated as "missing".
+    if (err.message?.includes("uses vector size")) throw err;
+    const isNotFound = err.status === 404 || /not found/i.test(err.message ?? "");
+    if (!isNotFound) throw err;
   }
+
+  await qdrant.createCollection(name, {
+    vectors: { size: VECTOR_SIZE, distance: "Cosine" },
+  });
+  console.log("✅ Created collection:", name);
+
+  await qdrant.createPayloadIndex(name, {
+    field_name:   "workspaceId",
+    field_schema: "keyword",
+  });
+  await qdrant.createPayloadIndex(name, {
+    field_name:   "pdfId",
+    field_schema: "keyword",
+  });
+  console.log("✅ Payload indices created (workspaceId, pdfId)");
 }
 
 // ─── PDF metadata ─────────────────────────────────────────
@@ -202,140 +212,53 @@ async function fetchPdfMeta(pdfId) {
   };
 }
 
-// ─── Noise line detector ──────────────────────────────────
-const NOISE_PATTERNS = [
-  /IJISS\s+Vol\.\s*\d+/i,
-  /^Vol\.\s*\d+\s+No\.\s*\d+/i,
-  /^Page\s+\d+\s*$/i,
-  /^October|^November|^December|^January/i,
-  /^\s*\d+\s*$/,
-  /^[=+\-*/<>\[\]{}()×÷±∞\d\s.,;:]+$/,
-  /[∑∫∂∇≠≤≥√πμστφθλρψωαβγδεζη×÷±∞]{2,}/,
-  /^https?:\/\//i,
-  /^doi:/i,
-  /^\[?\d+\]?\s+[A-Z][a-z]+.*\d{4}[.,]/,
-];
-
-function isNoiseLine(line) {
-  const t = line.trim();
-  if (t.length === 0) return true;
-  return NOISE_PATTERNS.some((re) => re.test(t));
-}
-
-// ─── Section Heading Detector ─────────────────────────────
-function isLikelyHeading(line) {
-  const t = line.trim();
-  if (t.length < 4 || t.length > 60)  return false;
-  if (isNoiseLine(t))                  return false;
-  if (/[∑∫∂∇≠≤≥√πμστφθλρψωαβγδεζη×÷±∞]/.test(t)) return false;
-  if (/[,;]\s/.test(t))                return false;
-
-  if (/^(X{0,3})(IX|IV|V?I{0,3})\.\s+[A-Z][a-zA-Z\s\-]{2,}$/.test(t)) return true;
-  if (/^\d+(\.\d+)*\.?\s+[A-Z][a-zA-Z\s\-]{2,}$/.test(t))              return true;
-
-  if (/^[A-Z][A-Z\s\-]{3,}$/.test(t)) {
-    const wc = t.trim().split(/\s+/).length;
-    if (wc === 1 && t.length < 5) return false;
-    if (wc > 7)                   return false;
-    return true;
-  }
-  return false;
-}
-
-// ─── Text Normaliser ──────────────────────────────────────
-function normaliseText(raw) {
-  return raw
-    .replace(/IJISS\s+Vol\.\s*\d+\s+No\.\s*\d+[^\n]*/gi, "")
-    .replace(/(\w)-\n(\w)/g, "$1$2")
-    .replace(/[ \t]+/g, " ")
-    .replace(/\n{3,}/g, "\n\n")
-    .trim();
-}
-
-// ─── Section Extractor ────────────────────────────────────
-function extractSections(fullText) {
-  const lines    = fullText.split("\n").map((l) => l.trim());
-  const sections = [];
-  let current    = { title: "Preamble", lines: [], lineStart: 0 };
-
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-    if (isLikelyHeading(line)) {
-      if (current.lines.length > 3) sections.push({ ...current, lineEnd: i });
-      current = { title: line, lines: [], lineStart: i };
-    } else if (!isNoiseLine(line) && line.length > 15) {
-      current.lines.push(line);
-    }
-  }
-  if (current.lines.length > 3) sections.push({ ...current, lineEnd: lines.length });
-
-  if (sections.length < 3) {
-    console.warn("⚠️  Heading detection yielded < 3 sections; using paragraph fallback.");
-    return paragraphFallback(fullText);
-  }
-  return sections.filter((s) => s.lines.length > 5);
-}
-
-function paragraphFallback(fullText) {
-  const paragraphs = fullText
-    .split(/\n{2,}/)
-    .map((p) => p.replace(/\s+/g, " ").trim())
-    .filter((p) => p.length > 80 && !isNoiseLine(p));
-
-  const PAGE_BUCKET = 1200;
-  const sections    = [];
-  let bucket = [], bucketLen = 0, pageNum = 1;
-
-  for (const para of paragraphs) {
-    if (bucketLen + para.length > PAGE_BUCKET && bucket.length > 0) {
-      sections.push({ title: `Segment ${pageNum}`, lines: bucket, page: pageNum });
-      pageNum++; bucket = []; bucketLen = 0;
-    }
-    bucket.push(para);
-    bucketLen += para.length;
-  }
-  if (bucket.length > 0)
-    sections.push({ title: `Segment ${pageNum}`, lines: bucket, page: pageNum });
-
-  return sections;
-}
-
-// ─── Text Chunker ─────────────────────────────────────────
-function chunkSection(sectionText, overlap = CHUNK_OVERLAP) {
-  const sentences = sectionText
-    .split(/(?<=[.!?])\s+(?=[A-Z"(])/)
-    .map((s) => s.trim())
-    .filter((s) => s.length > 20);
-
-  const chunks = [];
-  let current  = "";
-  let carry    = "";
-
-  for (const sentence of sentences) {
-    if (current.length > 0 && current.length + sentence.length > CHUNK_MAX) {
-      if (current.length >= CHUNK_MIN) chunks.push(current.trim());
-      carry   = current.slice(-overlap).trim();
-      current = carry + " " + sentence;
-    } else {
-      current += (current ? " " : "") + sentence;
-      if (current.length >= CHUNK_TARGET) {
-        if (current.length >= CHUNK_MIN) chunks.push(current.trim());
-        carry   = current.slice(-overlap).trim();
-        current = "";
+// ─── Per-Page PDF Extraction ────────────────────────────
+/**
+ * Extract text page-by-page so every chunk carries its REAL page number.
+ * pdf-parse's `pagerender` hook is called once per page; we collect each
+ * page's text separately instead of using the merged `parsed.text`
+ * (which loses all page boundaries).
+ *
+ * @returns {Promise<{ pages: string[], numpages: number }>}
+ *   pages[i] is the normalised text of page i+1.
+ */
+export async function extractPagesFromPdf(buffer) {
+  const pages = [];
+  const parsed = await pdf(buffer, {
+    pagerender: async (pageData) => {
+      const tc = await pageData.getTextContent();
+      let text = "";
+      for (const item of tc.items) {
+        text += (item.str ?? "") + (item.hasEOL ? "\n" : " ");
       }
-    }
-  }
-  if (current.trim().length >= CHUNK_MIN) chunks.push(current.trim());
-  return chunks;
+      // pdf.js item order is visual, not reading order — join then normalise.
+      pages.push(normaliseText(text));
+      return text;
+    },
+  });
+  return { pages, numpages: parsed.numpages ?? pages.length };
 }
+
+// NOTE: section detection, chunking strategies and text normalisation live
+// in rag/chunker.js (strategy registry, selectable via CHUNK_STRATEGY).
+// This worker only orchestrates: download → extract → chunk → embed → index.
 
 // ─── Main Worker ──────────────────────────────────────────
-new Worker(
+const pdfWorker = new Worker(
   "pdf-queue",
   async (job) => {
-    const { pdfId, storagePath, userId, workspaceId } = job.data;
+   const { pdfId, storagePath, userId, workspaceId } = job.data;
 
     console.log("➡️  Processing PDF:", pdfId, "| workspace:", workspaceId);
+
+    try {
+    // Best-effort status transition: UPLOADED/QUEUED → PROCESSING.
+    // Missing `status` column on older schemas only produces a warning.
+    const { error: processingErr } = await supabase
+      .from("user_pdfs")
+      .update({ status: "PROCESSING" })
+      .eq("pdf_id", pdfId);
+    if (processingErr) console.warn("⚠️  Could not mark PDF as PROCESSING:", processingErr.message);
 
     if (!storagePath) throw new Error("No storagePath in job data");
     if (!workspaceId) throw new Error("No workspaceId in job data");
@@ -346,40 +269,25 @@ new Worker(
       .download(storagePath);
     if (dlErr) throw new Error("Download failed: " + dlErr.message);
 
-    // 2. Parse
-    const buffer   = Buffer.from(await fileData.arrayBuffer());
-    const parsed   = await pdf(buffer);
-    const fullText = normaliseText(parsed.text);
-    console.log("📑 Pages:", parsed.numpages, "| Text length:", fullText.length);
+    // 2. Parse (per-page, so citations carry real page numbers)
+    const buffer = Buffer.from(await fileData.arrayBuffer());
+    const { pages, numpages } = await extractPagesFromPdf(buffer);
+    if (numpages === 0 || !pages.some((p) => p.trim().length > 0)) {
+      throw new Error("PDF contains no extractable text (empty or scanned-image PDF; OCR is not supported)");
+    }
+    console.log("📑 Pages:", numpages, "| Text length:", pages.join("").length);
 
     // 3. Source metadata (carried into every chunk payload)
     const { fileName, pdfTitle } = await fetchPdfMeta(pdfId);
     console.log("📄 Document:", pdfTitle, "(", fileName, ")");
 
-    // 4. Chunk
-    const sections = extractSections(fullText);
-    console.log("📚 Sections detected:", sections.length);
-
-    const chunks = [];
-    let chunkCounter = 0;
-
-    for (const section of sections) {
-      const sectionText = section.lines.join(" ").replace(/\s+/g, " ").trim();
-      if (sectionText.length < 80) continue;
-
-      const sectionChunks = chunkSection(sectionText);
-      const approxPage    = section.page ?? Math.floor((section.lineStart ?? 0) / 60) + 1;
-
-      for (const chunkText of sectionChunks) {
-        chunks.push({
-          text:       chunkText,
-          page:       approxPage,
-          section:    section.title.substring(0, 120),
-          chunkIndex: chunkCounter++,
-        });
-      }
+    // 4. Chunk via the strategy registry (CHUNK_STRATEGY; default
+    // section-aware). Every chunk keeps its real page number.
+    const { chunks, strategy } = chunkDocument(pages);
+    console.log(`✂️  Chunking strategy: ${strategy} → ${chunks.length} chunks`);
+    if (chunks.length === 0) {
+      throw new Error("No indexable chunks produced (document may be too short or unparseable)");
     }
-    console.log("✅ Total chunks:", chunks.length);
 
     // 5. Upsert into workspace-scoped Qdrant collection
     const collectionName = `workspace_${workspaceId}`;
@@ -391,11 +299,19 @@ new Worker(
 
       while (retries < 3) {
         try {
-          const points = await Promise.all(
-            batch.map(async (c) => ({
-              id:     uuidv4(),
-              vector: await getEmbedding(c.text),
-              payload: {
+          // Bounded-concurrency embeddings, then a single upsert.
+          // Point IDs are deterministic (workspace:pdf:chunkIndex), so a
+          // retried batch upserts the same points instead of duplicating.
+          const vectors = await embedBatch(batch.map((c) => c.text));
+          if (vectors[0]?.length !== VECTOR_SIZE) {
+            throw new Error(
+              `Embedding dimension ${vectors[0]?.length} does not match collection size ${VECTOR_SIZE}`
+            );
+          }
+          const points = batch.map((c, j) => ({
+            id:     deterministicChunkId(workspaceId, pdfId, c.chunkIndex),
+            vector: vectors[j],
+            payload: {
                 // Identity — used for filtering at query time
                 workspaceId,
                 pdfId,
@@ -411,11 +327,11 @@ new Worker(
                 page:       c.page,
                 section:    c.section,
                 chunkIndex: c.chunkIndex,
+                chunkStrategy: strategy,
 
                 createdAt: new Date().toISOString(),
               },
-            }))
-          );
+            }));
           await qdrant.upsert(collectionName, { points });
           console.log(
             `📦 Batch ${Math.floor(i / BATCH_SIZE) + 1}/${Math.ceil(chunks.length / BATCH_SIZE)} ✅`
@@ -430,17 +346,33 @@ new Worker(
       await sleep(300);
     }
 
-    // 6. Mark PDF as indexed in Supabase
+    // 6. Mark PDF as indexed.
+    // NOTE: the app's metadata table is `user_pdfs` keyed by `pdf_id`
+    // (there is no `pdfs` table). The `status` field needs migration 001;
+    // `indexed`/`chunk_count`/`indexed_at` already exist in production.
     const { error: updateErr } = await supabase
-      .from("pdfs")
+      .from("user_pdfs")
       .update({
+        status:      "INDEXED",
         indexed:     true,
         chunk_count: chunks.length,
         indexed_at:  new Date().toISOString(),
       })
-      .eq("id", pdfId);
+      .eq("pdf_id", pdfId);
 
-    if (updateErr) console.warn("⚠️  Could not update indexing status:", updateErr.message);
+    if (updateErr) {
+      console.warn("⚠️  Could not update indexing status:", updateErr.message);
+      // Fallback for schemas without the `status` column (pre-migration).
+      const { error: fallbackErr } = await supabase
+        .from("user_pdfs")
+        .update({
+          indexed:     true,
+          chunk_count: chunks.length,
+          indexed_at:  new Date().toISOString(),
+        })
+        .eq("pdf_id", pdfId);
+      if (fallbackErr) console.warn("⚠️  Fallback status update failed:", fallbackErr.message);
+    }
 
     try {
       await generateAndStoreResearchGaps(workspaceId);
@@ -450,8 +382,24 @@ new Worker(
     }
 
     console.log("✅ Done:", pdfId, "→", collectionName);
+    } catch (jobErr) {
+      // Best-effort failure marker so the UI never shows a job as
+      // silently stuck, then rethrow so BullMQ records the failure
+      // and applies the queue's retry/backoff policy.
+      const { error: failErr } = await supabase
+        .from("user_pdfs")
+        .update({ status: "PROCESSING_FAILED" })
+        .eq("pdf_id", job.data.pdfId);
+      if (failErr) console.warn("⚠️  Could not mark PDF as failed:", failErr.message);
+      console.error("❌ PDF job failed:", job.data.pdfId, "-", jobErr.message);
+      throw jobErr;
+    }
   },
   { connection: REDIS_CONNECTION, concurrency: 1 }
 );
+
+pdfWorker.on("error", (err) => {
+  console.error("PDF worker error:", err?.message ?? err);
+});
 
 console.log("🚀 Radium PDF Worker running...");

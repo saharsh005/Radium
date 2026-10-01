@@ -1,0 +1,68 @@
+# Radium measured results — 2026-09-29T16:03:00.046Z
+
+Tool: `radium-bench/1`, Node v24.14.1. Every number below was measured in-process unless marked NOT MEASURED.
+
+## 1. Dataset
+
+- Offline fixtures (`backend/eval/fixtures.js`, synthetic, deterministic): 6-page paper; 5 retrieval candidates (1 high-score distractor, 2 relevant); 12 classifier questions; 4 verification cases.
+- Perf inputs: 12-question batch; 5-candidate rerank+diversify; 6-claim answer + 2 chunks; 20-page synthetic doc per chunking strategy.
+- Live workspace dataset: template only (`backend/eval/datasets/workspace-template.json`) — no labelled PDFs available in this environment, so no production retrieval/answer labels exist. Relevance labels were NOT fabricated.
+
+## 2. Retrieval metrics
+
+- Production Recall@5 / Recall@10 / Precision@5 / MRR / nDCG@5 / retrieval latency: **NOT MEASURED** (no Qdrant, no labels).
+- Synthetic ordering fixture (production code, non-production data): recall@3=0.5, mrr=1, ndcg@3=0.613, distinctDocs=3.
+
+## 3. Answer / grounding metrics
+
+- Verification battery (programmatic, 4 cases): pass rate 100% (4/4). No LLM judge was used.
+- Live faithfulness / answer relevance: **NOT MEASURED**.
+
+## 4. Citation metrics
+
+- Invented-citation detection (`[99]` with 2 sources → flagged invalid): covered by unit tests, passing.
+- Live citation correctness / completeness / unsupported-claim rate: **NOT MEASURED**.
+
+## 5. Latency / performance metrics
+
+- classify (12-question batch): mean 0.169ms, p50 0.137ms, p95 0.322ms (n=50).
+- rerank+diversify (5 candidates): mean 0.02ms, p50 0.014ms, p95 0.052ms (n=50).
+- verifyAnswer (6 claims): mean 0.236ms, p50 0.161ms, p95 0.427ms (n=30).
+- chunk/section-aware (22368 chars, 20 pages → 40 chunks): mean 1.177ms, p50 0.789ms, p95 4.596ms, ~19000000 chars/sec (n=11).
+- chunk/paragraph (22368 chars, 20 pages → 24 chunks): mean 0.253ms, p50 0.228ms, p95 0.351ms, ~88400000 chars/sec (n=11).
+- chunk/fixed (22368 chars, 20 pages → 35 chunks): mean 0.272ms, p50 0.222ms, p95 0.547ms, ~82200000 chars/sec (n=11).
+- chunk/recursive (22368 chars, 20 pages → 31 chunks): mean 0.204ms, p50 0.181ms, p95 0.287ms, ~110000000 chars/sec (n=11).
+- Embedding: dim 384, 246.08ms.
+- PDF indexing time / retrieval / LLM / end-to-end latency: **NOT MEASURED** (needs live pipeline).
+
+## 6. Reliability / security results
+
+- Automated tests: **88/88 passing** (fail 0).
+- Rate limiting (real server, 130 sequential GET /workspace): allowed=120, blocked429=10, enforced=true.
+- Empty-evidence refusal: route path NOT MEASURED live (needs Qdrant); programmatic refusal short-circuit covered by unit tests + verification battery case, passing.
+- Citation validation: unit-tested (in-range accepted, invented flagged), passing.
+- Prompt-injection framing: verified present in RAG prompt by unit test; end-to-end adversarial behaviour NOT MEASURED (needs LLM).
+
+## 7. Failed / unsupported measurements
+
+- Live retrieval quality, live grounding/answer quality, live citation metrics, indexing/retrieval/LLM/e2e latency, embedding latency (if model unfetchable): all NOT MEASURED — details in JSON under each key.
+
+## 8. Reproduction
+
+```bash
+cd backend
+npm test            # A: test counts
+node eval/run.js    # B: offline suites
+node eval/bench.js  # this report (includes C–E)
+```
+Live (when services exist): index 2–4 labelled PDFs, fill `eval/datasets/workspace-template.json`, set EVAL_WORKSPACE_ID, run worker + `EVAL_LIVE=1 node eval/bench.js`.
+
+## 9. Resume-safe metrics
+
+- 88/88 automated backend tests passing (node:test, zero-dependency).
+- Query classifier: 12/12 agreement on a pinned question set (heuristic, not ML accuracy).
+- Answer verifier: 4/4 on a groundedness battery incl. hallucinated-citation and refusal cases (programmatic checks, no LLM judge).
+- Chunking deterministic across 4 strategies with page-validity invariants (synthetic docs).
+- Rate limiting enforced live against the API (130-request probe; 10 × 429 past the 120/min budget).
+- Local RAG-helper latencies (n=50): rerank+diversify p95 0.052ms; claim verification p95 0.427ms; query classification p95 0.322ms per 12-question batch.
+- Production retrieval quality (Recall@K/MRR/nDCG), live citation metrics, and end-to-end latency: NOT MEASURED — excluded until live-labelled evaluation runs.

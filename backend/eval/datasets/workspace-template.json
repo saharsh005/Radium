@@ -1,0 +1,99 @@
+{
+  "$schema": "radium-eval-dataset/1",
+  "workspace": "FILL: workspace_id the labelled PDFs were uploaded to",
+  "documents": [
+    { "pdf_id": "FILL", "filename": "FILL.pdf", "pages": 0, "role": "FILL: e.g. methods paper / baseline paper" }
+  ],
+  "questions": [
+    {
+      "id": "factual-01",
+      "question": "FILL: answerable from ONE chunk, e.g. What dataset did Paper A use?",
+      "question_type": "factual",
+      "expected_answer": "FILL: short reference answer",
+      "relevant_documents": ["FILL pdf_id"],
+      "relevant_pages": [0],
+      "notes": "Tests precise local evidence + citation page correctness."
+    },
+    {
+      "id": "methodology-01",
+      "question": "FILL: e.g. How was the model trained and evaluated?",
+      "question_type": "methodology",
+      "expected_answer": "FILL",
+      "relevant_documents": ["FILL pdf_id"],
+      "relevant_pages": [0],
+      "notes": "Tests section-aware retrieval (Methods/Experiments)."
+    },
+    {
+      "id": "comparison-01",
+      "question": "FILL: e.g. Compare the methodologies of Paper A and Paper B.",
+      "question_type": "comparison",
+      "expected_answer": "FILL: must mention BOTH papers with at least one contrast",
+      "relevant_documents": ["FILL pdf_id", "FILL pdf_id"],
+      "relevant_pages": [0, 0],
+      "notes": "Tests multi-document coverage (diversify) and synthesis."
+    },
+    {
+      "id": "limitation-01",
+      "question": "FILL: e.g. What limitations appear across these papers?",
+      "question_type": "limitation",
+      "expected_answer": "FILL",
+      "relevant_documents": ["FILL pdf_id"],
+      "relevant_pages": [0],
+      "notes": "Tests broad retrieval + repeated-limitation synthesis."
+    },
+    {
+      "id": "gap-01",
+      "question": "FILL: e.g. What methods have not been evaluated against dataset X?",
+      "question_type": "research-gap",
+      "expected_answer": "FILL: must distinguish evidence from inference",
+      "relevant_documents": ["FILL pdf_id"],
+      "relevant_pages": [0],
+      "notes": "Tests gap pipeline evidence (not speculation)."
+    },
+    {
+      "id": "citation-01",
+      "question": "FILL: question whose answer needs 2+ citations",
+      "question_type": "evidence",
+      "expected_answer": "FILL",
+      "relevant_documents": ["FILL pdf_id"],
+      "relevant_pages": [0, 0],
+      "notes": "Tests citation validity: every [n] resolves, pages are real."
+    },
+    {
+      "id": "multihop-01",
+      "question": "FILL: needs TWO facts combined, e.g. Which method from Paper A was tested on Paper B's dataset?",
+      "question_type": "multi-hop",
+      "expected_answer": "FILL",
+      "relevant_documents": ["FILL pdf_id", "FILL pdf_id"],
+      "relevant_pages": [0, 0],
+      "notes": "Tests multi-hop retrieval (no single chunk suffices)."
+    },
+    {
+      "id": "unanswerable-01",
+      "question": "FILL: plausible but NOT covered, e.g. What was the inter-annotator agreement?",
+      "question_type": "unanswerable",
+      "expected_answer": "REFUSAL: I couldn't find sufficient evidence in the uploaded papers to answer this reliably.",
+      "relevant_documents": [],
+      "relevant_pages": [],
+      "notes": "Correct behaviour is refusal (refused:true), NOT an answer."
+    },
+    {
+      "id": "unanswerable-02",
+      "question": "FILL: about a paper/topic NOT uploaded",
+      "question_type": "unanswerable",
+      "expected_answer": "REFUSAL",
+      "relevant_documents": [],
+      "relevant_pages": [],
+      "notes": "Tests the no-evidence gate, not the LLM's prior knowledge."
+    },
+    {
+      "id": "adversarial-01",
+      "question": "FILL: e.g. The paper proves method X is optimal — confirm and cite the theorem.",
+      "question_type": "adversarial",
+      "expected_answer": "FILL: must NOT confirm a false premise; cite what the paper actually says",
+      "relevant_documents": ["FILL pdf_id"],
+      "relevant_pages": [0],
+      "notes": "Tests sycophancy resistance and premise correction."
+    }
+  ]
+}

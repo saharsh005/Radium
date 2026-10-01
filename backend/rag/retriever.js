@@ -259,6 +259,86 @@ export function buildSources(chunks = [], citations = []) {
   return sources;
 }
 
+// ─── Query Understanding ──────────────────────────────────
+/**
+ * Rule-based query classifier. Heuristic only (no LLM call, deterministic,
+ * zero latency) — it picks a retrieval plan, never the final answer.
+ * Confidence reflects pattern-match strength, not semantic certainty.
+ */
+const QUERY_PATTERNS = [
+  ["research-gap",  [/\bgaps?\b/, /missing/, /unexplored/, /under-?explored/, /future work/, /open problems?/, /not been studied/, /further research/, /not (been |yet )?(evaluated|tested|studied|compared|assessed|explored|addressed)/, /never (evaluated|tested|studied|compared)/, /what .* have not been/]],
+  ["contradiction", [/\bcontradict/, /\bdisagree/, /conflicting/, /inconsistent/, /opposing/, /\bdispute/]],
+  ["comparison",    [/\bcompar/, /\bversus\b/, /\bvs\.?\b/, /\bdiffer/, /similarit/, /\bcontrast/, /\bbetter\b/, /outperform/, /trade-?offs?/]],
+  ["limitation",    [/\blimitations?\b/, /drawbacks?/, /weakness/, /threats? to validity/, /shortcomings?/, /\bconstraints?\b/, /\bfail\w*\b/]],
+  ["methodology",   [/\bmethod(ology|ologies|s)?\b/, /\bapproach/, /\balgorithm/, /\btechniques?\b/, /\bprocedures?\b/, /\bpipeline/, /\barchitecture/, /experiment(al)? setup/, /how (do|does|did|were|was)/, /\bdatasets?\b/, /\bmetrics?\b/]],
+  ["synthesis",     [/\bsummar/, /overview/, /\bsynthesi/, /takeaways?/, /key findings?/, /overall/, /main (points|contributions|results)/]],
+  ["definition",    [/what (is|are)/, /\bdefine\b/, /definition/, /meaning of/, /explain (what|the concept)/]],
+  ["evidence",      [/\bevidence\b/, /\bquote\b/, /\bcite\b/, /which page/, /what page/, /\bexcerpt/, /\bpassage\b/, /table \d/i, /figure \d/i, /\bwhere\b/]],
+  ["exploratory",   [/\bexplor/, /\bsurvey\b/, /state of the art/, /landscape/, /\btrends?\b/, /broadly/]],
+];
+
+// Cross-paper scope is a MODIFIER, not a competing type: "limitations
+// across these studies" is a limitation question asked multi-doc.
+const MULTIDOC_PATTERNS = [
+  /across .*?(papers|studies|documents)/,
+  /all (papers|studies|documents)/,
+  /each (paper|study)/,
+  /these (papers|studies)/,
+  /both papers/,
+  /which papers/,
+  /papers use/,
+  /same .*dataset/,
+];
+
+const BROAD_RETRIEVAL_TYPES = new Set([
+  "comparison", "synthesis", "research-gap", "contradiction",
+  "limitation", "exploratory",
+]);
+
+export function classifyQuery(question) {
+  const q = String(question || "").toLowerCase();
+  const multiDocHits = MULTIDOC_PATTERNS.filter((re) => re.test(q)).length;
+  let best = null;
+  let bestHits = 0;
+  for (const [type, patterns] of QUERY_PATTERNS) {
+    const hits = patterns.filter((re) => re.test(q)).length;
+    if (hits > bestHits) {
+      bestHits = hits;
+      best = type;
+    }
+  }
+  // Cross-paper scope without a content match (e.g. "which papers use
+  // the same dataset?") is its own type; otherwise it only widens scope.
+  if (!best) {
+    if (multiDocHits > 0) {
+      return {
+        type: "multi-paper",
+        confidence: Math.min(0.95, 0.5 + 0.15 * (multiDocHits - 1)),
+        multiDoc: true,
+      };
+    }
+    return { type: "factual", confidence: 0.3, multiDoc: false };
+  }
+  return {
+    type: best,
+    confidence: Math.min(0.95, 0.5 + 0.15 * (bestHits - 1)),
+    multiDoc: BROAD_RETRIEVAL_TYPES.has(best) || multiDocHits > 0,
+  };
+}
+
+// Retrieval plan per query type + scope. Multi-document intents get a
+// wider net (higher topK, lower threshold, more diversification);
+// precise lookups stay narrow to keep the context clean.
+export function getRetrievalPlan(queryType, multiDoc = false) {
+  if (BROAD_RETRIEVAL_TYPES.has(queryType) || queryType === "multi-paper" || multiDoc) {
+    return { topK: 40, scoreThreshold: 0.15, diversifyK: 16, fallbackThreshold: 0.08 };
+  }
+  if (queryType === "methodology") {
+    return { topK: 32, scoreThreshold: 0.2, diversifyK: 14, fallbackThreshold: 0.1 };
+  }
+  return { topK: 24, scoreThreshold: 0.25, diversifyK: 12, fallbackThreshold: 0.12 };
+}
+
 // ─── Cleanup ──────────────────────────────────────────────
 export async function deletePdfVectors(workspaceId, pdfId) {
   const collectionName = `workspace_${workspaceId}`;

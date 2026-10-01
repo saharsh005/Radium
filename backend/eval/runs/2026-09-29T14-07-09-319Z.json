@@ -1,0 +1,134 @@
+{
+  "tool": "radium-eval/1",
+  "timestamp": "2026-09-29T14:07:09.319Z",
+  "node": "v24.14.1",
+  "live": false,
+  "suites": {
+    "query-classification": {
+      "name": "query-classification",
+      "accuracy": 1,
+      "correct": 12,
+      "total": 12,
+      "failures": [],
+      "latencyMs": 2.4
+    },
+    "chunking-invariants": {
+      "name": "chunking-invariants",
+      "strategies": {
+        "section-aware": {
+          "chunkCount": 6,
+          "avgChars": 593,
+          "validPages": true,
+          "deterministic": true,
+          "latencyMs": 2.59
+        },
+        "paragraph": {
+          "chunkCount": 6,
+          "avgChars": 593,
+          "validPages": true,
+          "deterministic": true,
+          "latencyMs": 0.45
+        },
+        "fixed": {
+          "chunkCount": 6,
+          "avgChars": 730,
+          "validPages": true,
+          "deterministic": true,
+          "latencyMs": 0.43
+        },
+        "recursive": {
+          "chunkCount": 5,
+          "avgChars": 837,
+          "validPages": true,
+          "deterministic": true,
+          "latencyMs": 0.37
+        }
+      }
+    },
+    "answer-verification": {
+      "name": "answer-verification",
+      "passRate": 1,
+      "pass": 4,
+      "total": 4,
+      "cases": [
+        {
+          "name": "grounded-cited",
+          "expectedVerdict": "supported",
+          "verdict": "supported",
+          "pass": true,
+          "citationCoverage": 1,
+          "latencyMs": 1.16
+        },
+        {
+          "name": "hallucinated-invalid-cite",
+          "expectedVerdict": "needs-review",
+          "verdict": "needs-review",
+          "pass": true,
+          "citationCoverage": 0,
+          "latencyMs": 0.16
+        },
+        {
+          "name": "refusal",
+          "expectedVerdict": "refused",
+          "verdict": "refused",
+          "pass": true,
+          "citationCoverage": null,
+          "latencyMs": 0.01
+        },
+        {
+          "name": "unanswerable-empty-evidence",
+          "expectedVerdict": "needs-review",
+          "verdict": "needs-review",
+          "pass": true,
+          "citationCoverage": 0,
+          "latencyMs": 0.03
+        }
+      ]
+    },
+    "retrieval-ordering": {
+      "name": "retrieval-ordering",
+      "query": "hybrid retrieval with lexical overlap",
+      "rankedPdfIds": [
+        "pdf-b",
+        "pdf-a",
+        "pdf-c",
+        "pdf-b",
+        "pdf-a"
+      ],
+      "distinctDocs": 3,
+      "metricsByK": {
+        "1": {
+          "k": 1,
+          "recall": 0,
+          "precision": 0,
+          "hitRate": 0,
+          "mrr": 0,
+          "ndcg": 0
+        },
+        "3": {
+          "k": 3,
+          "recall": 0,
+          "precision": 0,
+          "hitRate": 0,
+          "mrr": 0,
+          "ndcg": 0
+        },
+        "5": {
+          "k": 5,
+          "recall": 0,
+          "precision": 0,
+          "hitRate": 0,
+          "mrr": 0,
+          "ndcg": 0
+        }
+      },
+      "plan": {
+        "topK": 24,
+        "scoreThreshold": 0.25,
+        "diversifyK": 12,
+        "fallbackThreshold": 0.12
+      },
+      "latencyMs": 0.3
+    }
+  }
+}

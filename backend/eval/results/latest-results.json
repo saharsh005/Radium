@@ -1,0 +1,272 @@
+{
+  "tool": "radium-bench/1",
+  "timestamp": "2026-09-29T16:03:00.046Z",
+  "node": "v24.14.1",
+  "environment": {
+    "networkEgress": "unavailable (DNS fails; verified by probe)",
+    "liveServices": "all unreachable — live sections NOT MEASURED"
+  },
+  "dataset": {
+    "offline": "synthetic fixtures in backend/eval/fixtures.js (documented above)",
+    "live": "NOT MEASURED — no labelled documents available"
+  },
+  "retrieval": {
+    "liveRecall5": {
+      "status": "NOT MEASURED",
+      "reason": "no Qdrant access; no relevance labels",
+      "requires": "see live.requires above"
+    },
+    "liveRecall10": {
+      "status": "NOT MEASURED",
+      "reason": "no Qdrant access; no relevance labels",
+      "requires": "see live.requires above"
+    },
+    "livePrecision5": {
+      "status": "NOT MEASURED",
+      "reason": "no Qdrant access; no relevance labels",
+      "requires": "see live.requires above"
+    },
+    "liveMRR": {
+      "status": "NOT MEASURED",
+      "reason": "no Qdrant access; no relevance labels",
+      "requires": "see live.requires above"
+    },
+    "liveNDCG5": {
+      "status": "NOT MEASURED",
+      "reason": "no Qdrant access; no relevance labels",
+      "requires": "see live.requires above"
+    },
+    "liveRetrievalLatency": {
+      "status": "NOT MEASURED",
+      "reason": "no Qdrant access",
+      "requires": "see live.requires above"
+    },
+    "syntheticOrdering": {
+      "name": "retrieval-ordering",
+      "query": "hybrid retrieval with lexical overlap",
+      "rankedPdfIds": [
+        "pdf-b",
+        "pdf-a",
+        "pdf-c",
+        "pdf-b",
+        "pdf-a"
+      ],
+      "distinctDocs": 3,
+      "metricsByK": {
+        "1": {
+          "k": 1,
+          "recall": 0.5,
+          "precision": 1,
+          "hitRate": 1,
+          "mrr": 1,
+          "ndcg": 1
+        },
+        "3": {
+          "k": 3,
+          "recall": 0.5,
+          "precision": 0.3333333333333333,
+          "hitRate": 1,
+          "mrr": 1,
+          "ndcg": 0.6131471927654584
+        },
+        "5": {
+          "k": 5,
+          "recall": 1,
+          "precision": 0.4,
+          "hitRate": 1,
+          "mrr": 1,
+          "ndcg": 0.8772153153380493
+        }
+      },
+      "plan": {
+        "topK": 24,
+        "scoreThreshold": 0.25,
+        "diversifyK": 12,
+        "fallbackThreshold": 0.12
+      },
+      "latencyMs": 0.35
+    },
+    "note": "Synthetic ordering numbers exercise production rerank+diversify code but are NOT production retrieval quality."
+  },
+  "grounding": {
+    "verificationBattery": {
+      "name": "answer-verification",
+      "passRate": 1,
+      "pass": 4,
+      "total": 4,
+      "cases": [
+        {
+          "name": "grounded-cited",
+          "expectedVerdict": "supported",
+          "verdict": "supported",
+          "pass": true,
+          "citationCoverage": 1,
+          "latencyMs": 2.02
+        },
+        {
+          "name": "hallucinated-invalid-cite",
+          "expectedVerdict": "needs-review",
+          "verdict": "needs-review",
+          "pass": true,
+          "citationCoverage": 0,
+          "latencyMs": 0.16
+        },
+        {
+          "name": "refusal",
+          "expectedVerdict": "refused",
+          "verdict": "refused",
+          "pass": true,
+          "citationCoverage": null,
+          "latencyMs": 0.01
+        },
+        {
+          "name": "unanswerable-empty-evidence",
+          "expectedVerdict": "needs-review",
+          "verdict": "needs-review",
+          "pass": true,
+          "citationCoverage": 0,
+          "latencyMs": 0.06
+        }
+      ]
+    },
+    "llmJudge": "NOT USED — no LLM-judge scores are reported. Programmatic verifyAnswer verdicts only.",
+    "faithfulnessLive": {
+      "status": "NOT MEASURED",
+      "reason": "no Groq answers to judge",
+      "requires": "live pipeline + labelled answers"
+    },
+    "answerRelevanceLive": {
+      "status": "NOT MEASURED",
+      "reason": "no Groq answers to judge",
+      "requires": "live pipeline + labelled answers"
+    }
+  },
+  "citations": {
+    "invalidCitationDetection": "measured via unit tests (invented [99] flagged) + verification battery case",
+    "liveCorrectness": {
+      "status": "NOT MEASURED",
+      "reason": "no live answers",
+      "requires": "live pipeline"
+    },
+    "liveCompleteness": {
+      "status": "NOT MEASURED",
+      "reason": "no live answers",
+      "requires": "live pipeline"
+    }
+  },
+  "latency": {
+    "perf": {
+      "status": "measured",
+      "method": "in-process repeated calls to production functions; performance.now()",
+      "classify12Qs": {
+        "n": 50,
+        "mean": 0.169,
+        "p50": 0.137,
+        "p95": 0.322,
+        "min": 0.092,
+        "max": 0.394,
+        "unit": "ms per 12-question batch"
+      },
+      "rerankPlusDiversify5": {
+        "n": 50,
+        "mean": 0.02,
+        "p50": 0.014,
+        "p95": 0.052,
+        "min": 0.008,
+        "max": 0.179,
+        "unit": "ms per run over 5 candidates"
+      },
+      "verify6Claims": {
+        "n": 30,
+        "mean": 0.236,
+        "p50": 0.161,
+        "p95": 0.427,
+        "min": 0.124,
+        "max": 1.444,
+        "unit": "ms per 6-claim answer"
+      },
+      "chunking": {
+        "section-aware": {
+          "n": 11,
+          "mean": 1.177,
+          "p50": 0.789,
+          "p95": 4.596,
+          "min": 0.513,
+          "max": 4.596,
+          "inputChars": 22368,
+          "inputPages": 20,
+          "chunksProduced": 40,
+          "charsPerSec": 19000000
+        },
+        "paragraph": {
+          "n": 11,
+          "mean": 0.253,
+          "p50": 0.228,
+          "p95": 0.351,
+          "min": 0.214,
+          "max": 0.351,
+          "inputChars": 22368,
+          "inputPages": 20,
+          "chunksProduced": 24,
+          "charsPerSec": 88400000
+        },
+        "fixed": {
+          "n": 11,
+          "mean": 0.272,
+          "p50": 0.222,
+          "p95": 0.547,
+          "min": 0.197,
+          "max": 0.547,
+          "inputChars": 22368,
+          "inputPages": 20,
+          "chunksProduced": 35,
+          "charsPerSec": 82200000
+        },
+        "recursive": {
+          "n": 11,
+          "mean": 0.204,
+          "p50": 0.181,
+          "p95": 0.287,
+          "min": 0.12,
+          "max": 0.287,
+          "inputChars": 22368,
+          "inputPages": 20,
+          "chunksProduced": 31,
+          "charsPerSec": 110000000
+        }
+      }
+    },
+    "embedding": {
+      "status": "measured",
+      "dim": 384,
+      "latencyMs": 246.08,
+      "method": "production getEmbedding(), single text, cold start included"
+    }
+  },
+  "reliability": {
+    "tests": {
+      "status": "measured",
+      "pass": 88,
+      "fail": 0,
+      "total": 88,
+      "method": "npm test (node:test), parsed pass/fail counts"
+    },
+    "rateLimit": {
+      "status": "measured",
+      "method": "booted production server.js on :5001; 130 sequential GET /workspace without token (readLimiter max 120/min; limiter precedes auth)",
+      "requests": 130,
+      "allowed401": 120,
+      "blocked429": 10,
+      "other": 0,
+      "enforced": true,
+      "wallMs": 250
+    }
+  },
+  "failed": {
+    "live": {
+      "status": "NOT MEASURED",
+      "reason": "no reachable Qdrant/Supabase/Groq/Redis in this environment (all probes failed)",
+      "requires": "Qdrant + Supabase + Groq reachable, 2-4 labelled PDFs indexed in EVAL_WORKSPACE_ID, worker running; then run with EVAL_LIVE=1"
+    }
+  }
+}

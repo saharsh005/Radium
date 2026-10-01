@@ -21,6 +21,17 @@ const GAP_COLORS = {
   'POPULATION GAP':     '#f472b6',
 };
 
+// Document processing lifecycle (mirrors backend migration 001)
+const STATUS_META = {
+  QUEUED:            { color: '#8a8680', label: 'Queued for indexing' },
+  PROCESSING:        { color: '#7b9fd4', label: 'Processing…' },
+  INDEXED:           { color: '#4ade80', label: 'Indexed — ready for chat' },
+  UPLOAD_FAILED:     { color: '#e85d5d', label: 'Upload failed' },
+  PROCESSING_FAILED: { color: '#e85d5d', label: 'Processing failed' },
+  INDEXING_FAILED:   { color: '#e85d5d', label: 'Indexing failed' },
+  UNKNOWN:           { color: '#4a4845', label: 'Status unknown' },
+};
+
 const THEMES = {
   pdf: {
     bg:        '#0f0f0f',
@@ -84,6 +95,7 @@ export default function WorkspaceChatPage() {
   const [sending, setSending]       = useState(false);
   const [loadingMsgs, setLoadingMsgs] = useState(false);
   const [uploading, setUploading]   = useState(false);
+  const [uploadError, setUploadError] = useState(null);
   const [loadingGaps, setLoadingGaps] = useState(false);
   const [showGaps, setShowGaps]     = useState(false);
   const [chatMode, setChatMode]     = useState('pdf');
@@ -234,6 +246,7 @@ export default function WorkspaceChatPage() {
         papers:  data.papers  || [],
         gaps:    data.gaps    || [],
         mode:    chatMode,
+        verification: data.verification || null,
       }]);
       if (data.gaps?.length) {
         setGaps(prev => [
@@ -256,19 +269,31 @@ export default function WorkspaceChatPage() {
   const uploadPDFs = async files => {
     if (!files?.length) return;
     setUploading(true);
-    const token = await getToken();
-    for (const file of Array.from(files)) {
-      const fd = new FormData();
-      fd.append('pdf', file);
-      fd.append('workspaceId', workspaceId);
-      await fetch(`${API}/upload`, {
-        method: 'POST', headers: { Authorization: `Bearer ${token}` }, body: fd,
-      });
+    setUploadError(null);
+    try {
+      const token = await getToken();
+      const failures = [];
+      for (const file of Array.from(files)) {
+        const fd = new FormData();
+        fd.append('pdf', file);
+        fd.append('workspaceId', workspaceId);
+        try {
+          const res = await fetch(`${API}/upload`, {
+            method: 'POST', headers: { Authorization: `Bearer ${token}` }, body: fd,
+          });
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok) failures.push(`${file.name}: ${data?.error || `upload failed (${res.status})`}`);
+        } catch (err) {
+          failures.push(`${file.name}: ${err?.message || 'network error'}`);
+        }
+      }
+      if (failures.length) setUploadError(failures.join(' · '));
+      await loadWsData();
+      await loadGaps();
+      setShowGaps(true);
+    } finally {
+      setUploading(false);
     }
-    await loadWsData();
-    await loadGaps();
-    setShowGaps(true);
-    setUploading(false);
   };
 
   const newChat = async () => {
@@ -662,12 +687,15 @@ export default function WorkspaceChatPage() {
             <div className="tabs-bar">
               {workspacePdfs.filter(p => !closedPdfIds.has(p.pdf_id)).map(pdf => {
                 const active = activePdf?.pdf_id === pdf.pdf_id;
+                const meta = STATUS_META[pdf.status] || STATUS_META.UNKNOWN;
                 return (
                   <div
                     key={pdf.pdf_id}
                     className={`tab ${active ? 'active' : ''}`}
                     onClick={() => { setActivePdf(pdf); setActivePage(1); }}
+                    title={`${pdf.filename} — ${meta.label}`}
                   >
+                    <span style={{ width: 6, height: 6, borderRadius: '50%', background: meta.color, flexShrink: 0 }} />
                     <FileText size={10} style={{ flexShrink: 0, color: active ? th.accent : th.textMuted }} />
                     <span>{pdf.filename}</span>
                     <span
@@ -690,6 +718,24 @@ export default function WorkspaceChatPage() {
                 <input type="file" multiple accept=".pdf" hidden onChange={e => uploadPDFs(e.target.files)} />
               </label>
             </div>
+
+            {/* Upload error banner */}
+            {uploadError && (
+              <div style={{
+                display: 'flex', alignItems: 'center', gap: 8,
+                padding: '7px 12px', fontSize: 11, color: '#e85d5d',
+                background: 'rgba(232,93,93,0.07)',
+                borderBottom: `1px solid ${th.border}`,
+                flexShrink: 0,
+              }}>
+                <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={uploadError}>
+                  ⚠️ {uploadError}
+                </span>
+                <button onClick={() => setUploadError(null)} style={{ background: 'none', border: 'none', color: th.textMuted, cursor: 'pointer', padding: 0, display: 'flex' }}>
+                  <X size={11} />
+                </button>
+              </div>
+            )}
 
             {/* PDF viewer */}
             <div style={{
@@ -796,6 +842,19 @@ export default function WorkspaceChatPage() {
                           Radium
                           {m.mode === 'internet' && (
                             <span style={{ marginLeft: 6, fontSize: 9, color: th.accent, background: th.accentDim, border: `1px solid ${th.accentBdr}`, borderRadius: 4, padding: '1px 5px', letterSpacing: '0.06em' }}>WEB</span>
+                          )}
+                          {m.verification && m.verification.verdict && (
+                            <span
+                              title={m.verification.citationCoverage != null ? `Citation coverage: ${Math.round(m.verification.citationCoverage * 100)}%` : 'Groundedness check'}
+                              style={{
+                                marginLeft: 6, fontSize: 9, letterSpacing: '0.06em',
+                                color: m.verification.verdict === 'supported' ? '#4ade80' : m.verification.verdict === 'refused' || m.verification.verdict === 'no-claims' ? th.textMuted : '#e8a13d',
+                                background: th.bg3, border: `1px solid ${th.border}`,
+                                borderRadius: 4, padding: '1px 5px',
+                              }}
+                            >
+                              {String(m.verification.verdict).toUpperCase().replace(/-/g, ' ')}
+                            </span>
                           )}
                         </div>
                         <div className="md-body">
@@ -1004,8 +1063,10 @@ export default function WorkspaceChatPage() {
                                 background: th.bg3, border: `1px solid ${th.border}`,
                                 borderRadius: 4, padding: '2px 6px',
                                 fontSize: 10, color: th.textMuted,
-                              }}>
-                                <FileText size={9} /> {c.filename}
+                              }}
+                                title={c.section ? `${c.filename}${c.page ? ` — p.${c.page}` : ''} · ${c.section}` : c.filename}
+                              >
+                                <FileText size={9} /> {c.filename}{c.page ? ` p.${c.page}` : ''}
                               </div>
                             ))}
                           </div>
@@ -1065,10 +1126,22 @@ export default function WorkspaceChatPage() {
         {/* ── STATUS BAR ── */}
         <div className="status-bar">
           <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
-            <div style={{ width: 5, height: 5, borderRadius: '50%', background: '#4ade80' }} />
-            <span style={{ fontSize: 10, color: th.textMuted, fontWeight: 300 }}>
-              {workspacePdfs.length} doc{workspacePdfs.length !== 1 ? 's' : ''} indexed
-            </span>
+            {(() => {
+              const indexed = workspacePdfs.filter(p => p.status === 'INDEXED').length;
+              const failed = workspacePdfs.filter(p => p.status && /FAIL/i.test(p.status)).length;
+              const pending = workspacePdfs.length - indexed - failed;
+              const dot = failed > 0 ? '#e85d5d' : pending > 0 ? '#7b9fd4' : '#4ade80';
+              return (
+                <>
+                  <div style={{ width: 5, height: 5, borderRadius: '50%', background: dot }} />
+                  <span style={{ fontSize: 10, color: th.textMuted, fontWeight: 300 }}>
+                    {indexed}/{workspacePdfs.length} doc{workspacePdfs.length !== 1 ? 's' : ''} indexed
+                    {pending > 0 && ` · ${pending} processing`}
+                    {failed > 0 && ` · ${failed} failed`}
+                  </span>
+                </>
+              );
+            })()}
           </div>
           <div style={{ flex: 1 }} />
           <span style={{ fontSize: 10, color: th.textMuted, letterSpacing: '0.08em', textTransform: 'uppercase', fontWeight: 500 }}>

@@ -6,34 +6,31 @@ import { fileURLToPath } from "url";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-dotenv.config({ path: path.join(__dirname, "../.env") });
+dotenv.config({
+  path: path.join(__dirname, "../.env"),
+});
 
-export const COLLECTION_NAME = "pdf_chunks";
+const QDRANT_URL = process.env.QDRANT_URL;
+const QDRANT_API_KEY = process.env.QDRANT_API_KEY;
+
+if (!QDRANT_URL) {
+  throw new Error("QDRANT_URL is missing from backend/.env");
+}
+
+if (!QDRANT_API_KEY) {
+  throw new Error("QDRANT_API_KEY is missing from backend/.env");
+}
+
+console.log("Qdrant URL:", QDRANT_URL);
+console.log("Qdrant API key loaded:", Boolean(QDRANT_API_KEY));
 
 export function createQdrantClient(options = {}) {
   return new QdrantClient({
-    url: process.env.QDRANT_URL || "http://localhost:6333",
-    apiKey: process.env.QDRANT_API_KEY,
+    url: QDRANT_URL,
+    apiKey: QDRANT_API_KEY,
     checkCompatibility: false,
     ...options,
   });
 }
 
 export const qdrant = createQdrantClient();
-
-export async function ensureCollection(vectorSize) {
-  const collections = await qdrant.getCollections();
-  const exists = collections.collections.find(
-    c => c.name === COLLECTION_NAME
-  );
-
-  if (!exists) {
-    await qdrant.createCollection(COLLECTION_NAME, {
-      vectors: {
-        size: vectorSize,
-        distance: "Cosine"
-      }
-    });
-    console.log("✅ Qdrant collection created");
-  }
-}

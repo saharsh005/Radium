@@ -3,6 +3,7 @@ import Groq from "groq-sdk";
 import { clerkAuth } from "../middleware/auth.js";
 import { supabase } from "../utils/supabase.js";
 import { buildGapsPrompt, buildAbstractPrompt } from "../rag/prompts.js";
+import { sampleExcerpts, parseGapResponse, gapFilenames } from "../rag/gaps.js";
 import { createQdrantClient } from "../utils/qdrant.js";
 
 const router = express.Router();
@@ -85,11 +86,24 @@ router.delete("/:id", clerkAuth, async (req, res) => {
 
 router.get("/:id/pdfs", clerkAuth, async (req, res) => {
   try {
+    // Select lifecycle columns when the 001 migration has been applied;
+    // fall back to the base columns on older schemas.
     const { data, error } = await supabase
-      .from("user_pdfs").select("pdf_id, filename, uploaded_at, storage_path")
+      .from("user_pdfs")
+      .select("pdf_id, filename, uploaded_at, storage_path, status, chunk_count, indexed_at, error")
       .eq("workspace_id", req.params.id).eq("clerk_id", req.auth.userId)
       .order("uploaded_at", { ascending: false });
-    if (error) throw error;
+    if (error) {
+      if (/column|status|chunk_count|indexed_at/i.test(error.message ?? "")) {
+        const retry = await supabase
+          .from("user_pdfs").select("pdf_id, filename, uploaded_at, storage_path")
+          .eq("workspace_id", req.params.id).eq("clerk_id", req.auth.userId)
+          .order("uploaded_at", { ascending: false });
+        if (retry.error) throw retry.error;
+        return res.json((retry.data || []).map((p) => ({ ...p, status: "UNKNOWN" })));
+      }
+      throw error;
+    }
     res.json(data || []);
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -113,36 +127,24 @@ router.get("/:id/chats", clerkAuth, async (req, res) => {
 
 // ── RESEARCH GAPS ────────────────────────────────────────────────────────────
 
-// function splitGapText(gapText) {
-//   if (!gapText || typeof gapText !== "string") return { title: "", description: "" };
-//   const lines = gapText.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
-//   if (lines.length === 0) return { title: "", description: "" };
-//   return {
-//     title: lines[0],
-//     description: lines.slice(1).join(" ").trim() || "",
-//   };
-// }
+// NOTE: excerpt sampling and evidence resolution live in rag/gaps.js,
+// shared with the PDF worker so both gap paths behave identically.
 
-function sampleChunks(allChunks, sampleCount = 8, excerptLen = 150, maxContext = 1600) {
-  if (!allChunks?.length) return "";
-  const step    = Math.max(1, Math.floor(allChunks.length / sampleCount));
-  const sampled = [];
-  for (let i = 0; i < allChunks.length && sampled.length < sampleCount; i += step) {
-    sampled.push(allChunks[i]);
+// Citations built from a gap's resolved evidence — real files/pages,
+// never a blind first-N list. Falls back only for legacy rows.
+function evidenceCitations(gap, pdfNameMap, fallback) {
+  const cites = [];
+  for (const e of gap.evidence || []) {
+    if (!e.pdfId && !e.filename) continue;
+    cites.push({
+      pdfId: e.pdfId || null,
+      filename: e.filename || pdfNameMap[e.pdfId] || "Document",
+      page: e.page ?? null,
+      section: e.section ?? null,
+    });
+    if (cites.length >= 4) break;
   }
-  // Include last chunk for conclusion coverage
-  const last = allChunks[allChunks.length - 1];
-  if (sampled.length > 0 && sampled[sampled.length - 1].id !== last.id) sampled.push(last);
- 
-  let combined = "";
-  for (const c of sampled) {
-    const section = c.payload.section ? `[${c.payload.section}]` : "[Excerpt]";
-    const text    = (c.payload.text || "").slice(0, excerptLen).replace(/\s+/g, " ").trim();
-    const excerpt = `${section}\n${text}\n\n---\n\n`;
-    if (combined.length + excerpt.length > maxContext) break;
-    combined += excerpt;
-  }
-  return combined.trim();
+  return cites.length ? cites : fallback;
 }
 
 // ─── GET /:id/research-gaps ──────────────────────────────────────────────────
@@ -180,12 +182,28 @@ router.get("/:id/research-gaps", clerkAuth, async (req, res) => {
       .map(([pid, filename]) => ({ pdfId: pid, filename }));
 
     // ── Path 1: return stored gaps (no LLM call) ────────────────────────────
-    const { data: storedGaps, error: gapErr } = await supabase
-      .from("research_gaps")
-      .select("id, gap_text, gap_type, confidence, related_pdfs, created_at")
-      .eq("workspace_id", workspaceId)
-      .order("created_at", { ascending: true }); // ascending = insertion order
-    if (gapErr) throw gapErr;
+    // The `evidence` column needs migration 002; retry without it on
+    // older schemas (those rows get fallback citations).
+    let storedGaps = null;
+    {
+      const withEvidence = await supabase
+        .from("research_gaps")
+        .select("id, gap_text, gap_type, confidence, related_pdfs, evidence, created_at")
+        .eq("workspace_id", workspaceId)
+        .order("created_at", { ascending: true }); // ascending = insertion order
+      if (withEvidence.error && /column|evidence/i.test(withEvidence.error.message ?? "")) {
+        const legacy = await supabase
+          .from("research_gaps")
+          .select("id, gap_text, gap_type, confidence, related_pdfs, created_at")
+          .eq("workspace_id", workspaceId)
+          .order("created_at", { ascending: true });
+        if (legacy.error) throw legacy.error;
+        storedGaps = legacy.data;
+      } else {
+        if (withEvidence.error) throw withEvidence.error;
+        storedGaps = withEvidence.data;
+      }
+    }
 
     if (storedGaps?.length) {
       return res.json(storedGaps.map((gap, index) => {
@@ -198,7 +216,8 @@ router.get("/:id/research-gaps", clerkAuth, async (req, res) => {
           description,
           type:        gap.gap_type || "RESEARCH GAP",
           confidence:  gap.confidence ?? 0,
-          citations:   defaultCitations,
+          evidence:    Array.isArray(gap.evidence) ? gap.evidence : [],
+          citations:   evidenceCitations(gap, pdfNameMap, defaultCitations),
         };
       }));
     }
@@ -223,12 +242,14 @@ router.get("/:id/research-gaps", clerkAuth, async (req, res) => {
 
     if (!allChunks.length) return res.json([]);
 
-    const combinedText = sampleChunks(allChunks); // defined in your router file
+    // Same provenance-labelled sampling as the worker.
+    const { excerpts, contextText } = sampleExcerpts(allChunks);
+    if (!excerpts.length) return res.json([]);
     console.log(
-      `📊 On-demand gap generation: ${allChunks.length} chunks → ${combinedText.length} chars sampled`
+      `📊 On-demand gap generation: ${allChunks.length} chunks → ${contextText.length} chars sampled`
     );
 
-    const prompt = buildGapsPrompt(combinedText);
+    const prompt = buildGapsPrompt(contextText);
     const completion = await getAi().chat.completions.create({
       model:           "llama-3.3-70b-versatile",
       messages:        [{ role: "user", content: prompt }],
@@ -244,39 +265,41 @@ router.get("/:id/research-gaps", clerkAuth, async (req, res) => {
       catch (e) { console.warn("Gap parse error:", e); }
     }
 
-    const gaps = Array.isArray(parsed.gaps) ? parsed.gaps : [];
+    const gaps = parseGapResponse(parsed, excerpts);
     if (!gaps.length) return res.json([]);
 
     // ── Store so future reloads are free ────────────────────────────────────
-    const relatedPdfs = Object.values(pdfNameMap).slice(0, 3);
+    const relatedPdfs = gapFilenames(gaps);
 
-    const records = gaps.map((gap, index) => ({
+    const records = gaps.map((gap) => ({
       workspace_id: workspaceId,
-      gap_text: [
-        (gap.title?.trim()       || `Research Gap ${index + 1}`),
-        (gap.description?.trim() || ""),
-      ].filter(Boolean).join("\n\n"),
-      gap_type:     gap.type?.trim() || "RESEARCH GAP",
-      confidence:   0,
+      gap_text: [gap.title, gap.description].filter(Boolean).join("\n\n"),
+      gap_type:     gap.type,
+      confidence:   gap.confidence,
       related_pdfs: relatedPdfs,
+      evidence:     gap.evidence, // needs migration 002; dropped on older schemas
     }));
 
     // Fire-and-forget — don't block the response on the insert
-    supabase
-      .from("research_gaps")
-      .insert(records)
-      .then(({ error }) => {
-        if (error) console.warn("Could not store on-demand research gaps:", error.message);
-        else console.log(`✅ Stored ${records.length} on-demand gaps for workspace ${workspaceId}`);
-      });
+    (async () => {
+      let { error } = await supabase.from("research_gaps").insert(records);
+      if (error && /column|evidence/i.test(error.message ?? "")) {
+        const legacy = records.map(({ evidence: _dropped, ...row }) => row);
+        ({ error } = await supabase.from("research_gaps").insert(legacy));
+      }
+      if (error) console.warn("Could not store on-demand research gaps:", error.message);
+      else console.log(`✅ Stored ${records.length} on-demand gaps for workspace ${workspaceId}`);
+    })();
 
     // Return immediately with the generated gaps (using temp ids)
     return res.json(gaps.map((gap, i) => ({
       id:          `gap-${i}`,          // real uuid arrives on next reload from DB
-      title:       gap.title?.trim()       || `Gap ${i + 1}`,
-      description: gap.description?.trim() || "",
-      type:        gap.type?.trim()        || "RESEARCH GAP",
-      citations:   defaultCitations,
+      title:       gap.title,
+      description: gap.description,
+      type:        gap.type,
+      confidence:  gap.confidence,
+      evidence:    gap.evidence,
+      citations:   evidenceCitations(gap, pdfNameMap, defaultCitations),
     })));
 
   } catch (err) {
