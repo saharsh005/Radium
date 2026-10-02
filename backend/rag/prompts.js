@@ -94,33 +94,79 @@ OUTPUT FORMAT — respond ONLY with valid JSON, no markdown fences:
 }
 
 /**
- * Builds the research-gaps prompt.
+ * Builds the research-gaps prompt (limitation-first, evidence-levelled).
  *
- * IMPORTANT: This receives sampled excerpts (~8 000 chars max), NOT the
- * full PDF text. The sampling is done in the worker / route before calling
- * this function. Do NOT pass raw full-document text here.
+ * IMPORTANT: This receives sampled excerpts (~1,600 chars), NOT the
+ * full PDF text. Sampling is done by the caller (rag/gaps.js).
  *
- * Changes from original:
- *   - Raised gap count to 4–6 (3 was too few for multi-paper workspaces)
- *   - Added mandatory `type` field so the frontend can colour-code cards
- *   - Tightened instructions to avoid hallucination on thin context
+ * The model must NOT jump from contribution to gap. For each candidate it
+ * must walk: unresolved limitation (grounded in excerpts) → inference that
+ * leads to the gap → evidence level. Author-stated positions must never
+ * be inverted (e.g. a paper motivated by removing X must not be cited as
+ * limited by the absence of X).
  */
 export function buildGapsPrompt(sampledExcerpts) {
-  return `You are a research analyst. Read these document excerpts and identify 3 to 5 research gaps.
+  return `You are a rigorous research analyst. Read these document excerpts and identify 3 to 5 research gaps.
 
 EXCERPTS (each has a reference ID like [E1], with source file, page and section):
 ${sampledExcerpts}
 
+WORKFLOW — follow it in order for every candidate, do not skip steps:
+1. LIMITATION: what weakness, failure case, or unresolved problem do the excerpts support?
+   Prefer, in order: (a) explicit author statements ("limitation", "future work", "however", "remains", "difficult", "cannot");
+   (b) results that reveal weakness (performance drops, narrow evaluation, untested settings);
+   (c) assumptions the method relies on that the excerpts show may fail.
+2. GAP: what specific research opportunity follows from that limitation?
+3. INFERENCE CHECK: state in one sentence how the gap follows from the limitation.
+   If it does not follow, discard the candidate.
+
 Rules:
-- Only identify gaps based on what IS in the excerpts — do not invent topics.
-- Each gap needs: title (8–12 words), description (1–2 sentences), type.
+- LIMITATION IS NOT A GAP, and a contribution IS NOT a limitation. A paper motivated by removing X must never be described as limited by the absence of X.
+- Only use what IS in the excerpts — do not invent topics, datasets, numbers, or author claims.
+- "Not discussed in these excerpts" must be labelled as such, never filled in.
+- Each gap needs: title (8–12 words), description (1–2 sentences), limitation (1–2 sentences grounded in excerpts), reasoning (one sentence: limitation → gap), type, evidenceLevel.
 - Type must be exactly one of: METHODOLOGICAL GAP | THEORETICAL GAP | EMPIRICAL GAP | APPLICATION GAP | POPULATION GAP
-- EVIDENCE IS MANDATORY: every gap must list 1–3 excerpt IDs (e.g. ["E1","E3"]) that support it.
+- evidenceLevel must be exactly one of:
+  EXPLICIT (authors directly state the limitation/future work),
+  STRONGLY_SUPPORTED (experiments demonstrate it and authors discuss it),
+  SUPPORTED_INFERENCE (derived from documented limitations/results),
+  SPECULATIVE (interesting but insufficiently evidenced — use sparingly).
+- EVIDENCE IS MANDATORY: every gap must list 1–3 excerpt IDs (e.g. ["E1","E3"]) that support the LIMITATION.
   Use ONLY IDs that appear above. A gap without supporting excerpts will be discarded.
 - If the excerpts are insufficient, return an empty gaps array.
 - Return valid JSON only, no markdown, no explanation.
 
-{"gaps":[{"title":"...","description":"...","type":"...","evidence":["E1","E3"]}]}`;
+{"gaps":[{"title":"...","description":"...","limitation":"...","reasoning":"...","type":"...","evidenceLevel":"...","evidence":["E1","E3"]}]}`;
+}
+
+/**
+ * Builds the contradiction-screen prompt.
+ *
+ * Given the same excerpts plus the candidate gaps, the model reports any
+ * candidate that the workspace evidence already addresses (contradicted).
+ * Those candidates are rejected, not shown. Keep the call small: gaps are
+ * passed compactly, excerpts reused from gap generation.
+ */
+export function buildGapScreenPrompt(sampledExcerpts, gaps) {
+  const compact = (gaps || []).map((g, i) => ({
+    gapIndex: i,
+    title: g.title,
+    description: g.description,
+    evidence: (g.evidence || []).map((e) => e.ref),
+  }));
+  return `You are a strict reviewer. These excerpts come from a research workspace:
+
+${sampledExcerpts}
+
+CANDIDATE GAPS (with the excerpt IDs each one cites):
+${JSON.stringify(compact)}
+
+For each candidate, decide: does ANY excerpt — cited or not — show the gap is already addressed, contradicted, or based on a misreading (e.g. calling a paper's stated motivation a limitation)?
+- contradicted=true ONLY with concrete contradicting excerpt IDs.
+- When unsure, contradicted=false. Never invent excerpts.
+- Return valid JSON only, no markdown, no explanation.
+
+{"reviews":[{"gapIndex":0,"contradicted":false,"contradictingRefs":[],"note":"..."}]}`;
 }
 
 /**

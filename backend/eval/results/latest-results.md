@@ -1,4 +1,4 @@
-# Radium measured results — 2026-09-29T16:03:00.046Z
+# Radium measured results — 2026-10-01T15:34:52.693Z
 
 Tool: `radium-bench/1`, Node v24.14.1. Every number below was measured in-process unless marked NOT MEASURED.
 
@@ -25,14 +25,14 @@ Tool: `radium-bench/1`, Node v24.14.1. Every number below was measured in-proces
 
 ## 5. Latency / performance metrics
 
-- classify (12-question batch): mean 0.169ms, p50 0.137ms, p95 0.322ms (n=50).
-- rerank+diversify (5 candidates): mean 0.02ms, p50 0.014ms, p95 0.052ms (n=50).
-- verifyAnswer (6 claims): mean 0.236ms, p50 0.161ms, p95 0.427ms (n=30).
-- chunk/section-aware (22368 chars, 20 pages → 40 chunks): mean 1.177ms, p50 0.789ms, p95 4.596ms, ~19000000 chars/sec (n=11).
-- chunk/paragraph (22368 chars, 20 pages → 24 chunks): mean 0.253ms, p50 0.228ms, p95 0.351ms, ~88400000 chars/sec (n=11).
-- chunk/fixed (22368 chars, 20 pages → 35 chunks): mean 0.272ms, p50 0.222ms, p95 0.547ms, ~82200000 chars/sec (n=11).
-- chunk/recursive (22368 chars, 20 pages → 31 chunks): mean 0.204ms, p50 0.181ms, p95 0.287ms, ~110000000 chars/sec (n=11).
-- Embedding: dim 384, 246.08ms.
+- classify (12-question batch): mean 0.182ms, p50 0.184ms, p95 0.293ms (n=50).
+- rerank+diversify (5 candidates): mean 0.02ms, p50 0.009ms, p95 0.058ms (n=50).
+- verifyAnswer (6 claims): mean 0.413ms, p50 0.323ms, p95 0.723ms (n=30).
+- chunk/section-aware (22368 chars, 20 pages → 40 chunks): mean 1.321ms, p50 1.295ms, p95 2.28ms, ~16900000 chars/sec (n=11).
+- chunk/paragraph (22368 chars, 20 pages → 24 chunks): mean 0.641ms, p50 0.622ms, p95 0.786ms, ~34900000 chars/sec (n=11).
+- chunk/fixed (22368 chars, 20 pages → 35 chunks): mean 0.36ms, p50 0.233ms, p95 0.825ms, ~62100000 chars/sec (n=11).
+- chunk/recursive (22368 chars, 20 pages → 31 chunks): mean 0.21ms, p50 0.177ms, p95 0.333ms, ~107000000 chars/sec (n=11).
+- Embedding: dim 384, 230.34ms.
 - PDF indexing time / retrieval / LLM / end-to-end latency: **NOT MEASURED** (needs live pipeline).
 
 ## 6. Reliability / security results
@@ -64,5 +64,5 @@ Live (when services exist): index 2–4 labelled PDFs, fill `eval/datasets/works
 - Answer verifier: 4/4 on a groundedness battery incl. hallucinated-citation and refusal cases (programmatic checks, no LLM judge).
 - Chunking deterministic across 4 strategies with page-validity invariants (synthetic docs).
 - Rate limiting enforced live against the API (130-request probe; 10 × 429 past the 120/min budget).
-- Local RAG-helper latencies (n=50): rerank+diversify p95 0.052ms; claim verification p95 0.427ms; query classification p95 0.322ms per 12-question batch.
+- Local RAG-helper latencies (n=50): rerank+diversify p95 0.058ms; claim verification p95 0.723ms; query classification p95 0.293ms per 12-question batch.
 - Production retrieval quality (Recall@K/MRR/nDCG), live citation metrics, and end-to-end latency: NOT MEASURED — excluded until live-labelled evaluation runs.

@@ -15,9 +15,8 @@ import { deterministicChunkId } from "../utils/ids.js";
 import { createRedisConnection } from "./redisConnection.js";
 import { createQdrantClient } from "../utils/qdrant.js";
 import { chunkDocument, normaliseText } from "../rag/chunker.js";
-import { sampleExcerpts, parseGapResponse, gapFilenames } from "../rag/gaps.js";
+import { generateWorkspaceGaps, gapFilenames, toGapRecord, insertGapRecords } from "../rag/gaps.js";
 import { supabase } from "../utils/supabase.js";
-import { buildGapsPrompt } from "../rag/prompts.js";
 
 // ─── Config ───────────────────────────────────────────────
 // Shared Redis options: supports REDIS_URL / rediss TLS (Upstash) as well
@@ -37,65 +36,64 @@ function getAi() {
 async function generateAndStoreResearchGaps(workspaceId) {
   if (!workspaceId) return;
   const collectionName = `workspace_${workspaceId}`;
- 
-  const { points: allChunks } = await qdrant.scroll(collectionName, {
-    filter: { must: [{ key: "workspaceId", match: { value: workspaceId } }] },
-    limit: 100,
-    with_payload: true,
-  });
- 
+
+  let allChunks = [];
+  try {
+    const { points } = await qdrant.scroll(collectionName, {
+      filter: { must: [{ key: "workspaceId", match: { value: workspaceId } }] },
+      limit: 100,
+      with_payload: true,
+    });
+    allChunks = points || [];
+  } catch (err) {
+    console.warn("Qdrant scroll failed for gap generation:", err.message);
+    return;
+  }
+
   if (!allChunks?.length) {
     console.log(`ℹ️  No chunks found for workspace ${workspaceId}, skipping gap generation.`);
     return;
   }
- 
-  // Provenance-labelled sampling (rag/gaps.js): each excerpt carries its
-  // reference ID, file, page and section. Budget stays token-safe for the
-  // Groq tier (≈1,600 chars of context).
-  const { excerpts, contextText } = sampleExcerpts(allChunks);
-  if (!excerpts.length) {
-    console.log(`ℹ️  No usable excerpts for workspace ${workspaceId}, skipping gap generation.`);
+
+  // Shared limitation-first pipeline (rag/gaps.js): zone-prioritized
+  // sampling → layered gaps → contradiction screen. Token budget stays
+  // safe for the Groq tier (≈1,600 chars of context + one screen call).
+  const completeJson = async (prompt) => {
+    const completion = await getAi().chat.completions.create({
+      model:           "openai/gpt-oss-120b",
+      messages:        [{ role: "user", content: prompt }],
+      temperature:     0.3,
+      max_tokens:      1500,
+      response_format: { type: "json_object" },
+    });
+    return JSON.parse(completion?.choices?.[0]?.message?.content || '{"gaps":[]}');
+  };
+
+  let result;
+  try {
+    result = await generateWorkspaceGaps({ points: allChunks, completeJson });
+  } catch (err) {
+    console.warn("Gap pipeline failed:", err.message);
     return;
   }
-
-  console.log(`📊 Sending ${excerpts.length} excerpts (${contextText.length} chars / ~${Math.ceil(contextText.length / 4)} tokens) to LLM`);
-
-  const prompt = buildGapsPrompt(contextText);
- 
-  const completion = await getAi().chat.completions.create({
-    model:           "llama-3.3-70b-versatile",
-    messages:        [{ role: "user", content: prompt }],
-    temperature:     0.3,
-    max_tokens:      1500,  // ↓ from 2000
-    response_format: { type: "json_object" },
-  });
- 
-  const rawContent = completion?.choices?.[0]?.message?.content;
-  let parsed = { gaps: [] };
-  if (rawContent) {
-    try { parsed = JSON.parse(rawContent); }
-    catch (parseErr) { console.warn("Research gaps parse error:", parseErr); }
+  const { gaps, excerpts, screened, dropped, error } = result;
+  if (error) {
+    console.warn("Gap LLM call failed:", error);
+    return;
   }
- 
-  // Evidence resolution: only gaps whose references resolve to real
-  // sampled excerpts survive. Confidence = resolved/claimed (measured).
-  const gaps = parseGapResponse(parsed, excerpts);
+  console.log(`📊 Gap pipeline: ${excerpts.length} excerpts → ${gaps.length} candidates (screened=${screened}, rejected=${dropped.length})`);
   if (!gaps.length) {
-    console.log(`ℹ️  No evidence-backed gaps for workspace ${workspaceId} (LLM output had no resolvable evidence).`);
+    console.log(`ℹ️  No evidence-backed gaps for workspace ${workspaceId}.`);
     return;
+  }
+  for (const d of dropped) {
+    console.log(`🚫 Gap rejected by contradiction screen: "${d.gap.title}" — ${d.note}`);
   }
 
   // Source PDFs are the ones actually referenced — never a blind first-3.
   const relatedPdfs = gapFilenames(gaps);
-
-  const records = gaps.map((gap) => ({
-    workspace_id: workspaceId,
-    gap_text: [gap.title, gap.description].filter(Boolean).join("\n\n"),
-    gap_type:     gap.type,
-    confidence:   gap.confidence,
-    related_pdfs: relatedPdfs,
-    evidence:     gap.evidence, // needs migration 002; dropped on older schemas
-  }));
+  const verification = screened ? "verified" : "unverified";
+  const records = gaps.map((gap) => toGapRecord(workspaceId, gap, relatedPdfs, verification));
 
   const { error: deleteErr } = await supabase
     .from("research_gaps")
@@ -103,14 +101,10 @@ async function generateAndStoreResearchGaps(workspaceId) {
     .eq("workspace_id", workspaceId);
   if (deleteErr) console.warn("Could not clear previous research gaps:", deleteErr.message);
 
-  let { error: insertErr } = await supabase.from("research_gaps").insert(records);
-  if (insertErr && /column|evidence/i.test(insertErr.message ?? "")) {
-    // Pre-migration schema: retry without the evidence column.
-    const legacy = records.map(({ evidence: _dropped, ...row }) => row);
-    ({ error: insertErr } = await supabase.from("research_gaps").insert(legacy));
-  }
-  if (insertErr) console.warn("Could not store research gaps:", insertErr.message);
-  else console.log(`✅ Stored ${records.length} evidence-backed gaps for workspace ${workspaceId}`);
+  const stored = await insertGapRecords(supabase, records);
+  if (!stored.ok) console.warn("Could not store research gaps:", stored.error?.message);
+  else console.log(`✅ Stored ${records.length} evidence-backed gaps for workspace ${workspaceId}` +
+    (stored.droppedColumns.length ? ` (legacy schema, dropped: ${stored.droppedColumns.join(",")})` : ""));
 }
  
 
@@ -291,7 +285,11 @@ const pdfWorker = new Worker(
 
     // 5. Upsert into workspace-scoped Qdrant collection
     const collectionName = `workspace_${workspaceId}`;
-    await ensureCollection(collectionName);
+    try {
+      await ensureCollection(collectionName);
+    } catch (err) {
+      throw new Error(`qdrant ensure-collection failed: ${err.message}`);
+    }
 
     for (let i = 0; i < chunks.length; i += BATCH_SIZE) {
       const batch   = chunks.slice(i, i + BATCH_SIZE);
@@ -302,7 +300,12 @@ const pdfWorker = new Worker(
           // Bounded-concurrency embeddings, then a single upsert.
           // Point IDs are deterministic (workspace:pdf:chunkIndex), so a
           // retried batch upserts the same points instead of duplicating.
-          const vectors = await embedBatch(batch.map((c) => c.text));
+          let vectors;
+          try {
+            vectors = await embedBatch(batch.map((c) => c.text));
+          } catch (err) {
+            throw new Error(`embedding failed: ${err.message}`);
+          }
           if (vectors[0]?.length !== VECTOR_SIZE) {
             throw new Error(
               `Embedding dimension ${vectors[0]?.length} does not match collection size ${VECTOR_SIZE}`
@@ -332,7 +335,9 @@ const pdfWorker = new Worker(
                 createdAt: new Date().toISOString(),
               },
             }));
-          await qdrant.upsert(collectionName, { points });
+          await qdrant.upsert(collectionName, { points }).catch((err) => {
+            throw new Error(`qdrant upsert failed: ${err.message}`);
+          });
           console.log(
             `📦 Batch ${Math.floor(i / BATCH_SIZE) + 1}/${Math.ceil(chunks.length / BATCH_SIZE)} ✅`
           );

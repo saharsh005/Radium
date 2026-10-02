@@ -194,7 +194,7 @@ router.post("/", clerkAuth, async (req, res) => {
     const prompt = buildRagPrompt(context, historyText, question);
     const t3 = Date.now();
     const completion = await getAi().chat.completions.create({
-      model:           "llama-3.3-70b-versatile",
+      model:           "openai/gpt-oss-120b",
       messages:        [{ role: "user", content: prompt }],
       temperature:     0.3,
       max_tokens:      6000,
@@ -334,7 +334,7 @@ router.post("/internet", clerkAuth, async (req, res) => {
     let kwData = { keywords: [], authors: [] };
     try {
       const kwCompletion = await getAi().chat.completions.create({
-        model: "llama-3.3-70b-versatile",
+        model: "openai/gpt-oss-120b",
         messages: [{
           role: "user",
           content: `Extract 3-5 academic search keywords and up to 2 author names from this research question. Return JSON only: {"keywords":["..."],"authors":["..."]}
@@ -454,7 +454,7 @@ Provide a clear, cited academic answer in Markdown.`;
 
     const t2 = Date.now();
     const answerCompletion = await getAi().chat.completions.create({
-      model:       "llama-3.3-70b-versatile",
+      model:       "openai/gpt-oss-120b",
       messages:    [{ role: "user", content: synthesisPrompt }],
       temperature: 0.4,
       max_tokens:  3000,

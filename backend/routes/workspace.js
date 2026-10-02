@@ -2,8 +2,8 @@ import express from "express";
 import Groq from "groq-sdk";
 import { clerkAuth } from "../middleware/auth.js";
 import { supabase } from "../utils/supabase.js";
-import { buildGapsPrompt, buildAbstractPrompt } from "../rag/prompts.js";
-import { sampleExcerpts, parseGapResponse, gapFilenames } from "../rag/gaps.js";
+import { buildAbstractPrompt } from "../rag/prompts.js";
+import { generateWorkspaceGaps, gapFilenames, toGapRecord, insertGapRecords, sampleExcerpts } from "../rag/gaps.js";
 import { createQdrantClient } from "../utils/qdrant.js";
 
 const router = express.Router();
@@ -182,16 +182,16 @@ router.get("/:id/research-gaps", clerkAuth, async (req, res) => {
       .map(([pid, filename]) => ({ pdfId: pid, filename }));
 
     // ── Path 1: return stored gaps (no LLM call) ────────────────────────────
-    // The `evidence` column needs migration 002; retry without it on
-    // older schemas (those rows get fallback citations).
+    // New columns need migrations 002/003; fall back gracefully on
+    // older schemas (those rows get fallback citations, no chain fields).
     let storedGaps = null;
     {
-      const withEvidence = await supabase
+      const withChain = await supabase
         .from("research_gaps")
-        .select("id, gap_text, gap_type, confidence, related_pdfs, evidence, created_at")
+        .select("id, gap_text, gap_type, confidence, related_pdfs, evidence, evidence_level, limitation, reasoning, verification, created_at")
         .eq("workspace_id", workspaceId)
         .order("created_at", { ascending: true }); // ascending = insertion order
-      if (withEvidence.error && /column|evidence/i.test(withEvidence.error.message ?? "")) {
+      if (withChain.error && /column/i.test(withChain.error.message ?? "")) {
         const legacy = await supabase
           .from("research_gaps")
           .select("id, gap_text, gap_type, confidence, related_pdfs, created_at")
@@ -200,8 +200,8 @@ router.get("/:id/research-gaps", clerkAuth, async (req, res) => {
         if (legacy.error) throw legacy.error;
         storedGaps = legacy.data;
       } else {
-        if (withEvidence.error) throw withEvidence.error;
-        storedGaps = withEvidence.data;
+        if (withChain.error) throw withChain.error;
+        storedGaps = withChain.data;
       }
     }
 
@@ -216,6 +216,10 @@ router.get("/:id/research-gaps", clerkAuth, async (req, res) => {
           description,
           type:        gap.gap_type || "RESEARCH GAP",
           confidence:  gap.confidence ?? 0,
+          evidenceLevel: gap.evidence_level || null,
+          limitation:  gap.limitation || null,
+          reasoning:   gap.reasoning || null,
+          verification: gap.verification || null,
           evidence:    Array.isArray(gap.evidence) ? gap.evidence : [],
           citations:   evidenceCitations(gap, pdfNameMap, defaultCitations),
         };
@@ -242,52 +246,40 @@ router.get("/:id/research-gaps", clerkAuth, async (req, res) => {
 
     if (!allChunks.length) return res.json([]);
 
-    // Same provenance-labelled sampling as the worker.
-    const { excerpts, contextText } = sampleExcerpts(allChunks);
-    if (!excerpts.length) return res.json([]);
-    console.log(
-      `📊 On-demand gap generation: ${allChunks.length} chunks → ${contextText.length} chars sampled`
-    );
+    // Shared limitation-first pipeline (same as the worker).
+    const completeJson = async (prompt) => {
+      const completion = await getAi().chat.completions.create({
+        model:           "openai/gpt-oss-120b",
+        messages:        [{ role: "user", content: prompt }],
+        temperature:     0.3,
+        max_tokens:      1500,
+        response_format: { type: "json_object" },
+      });
+      return JSON.parse(completion?.choices?.[0]?.message?.content || '{"gaps":[]}');
+    };
 
-    const prompt = buildGapsPrompt(contextText);
-    const completion = await getAi().chat.completions.create({
-      model:           "llama-3.3-70b-versatile",
-      messages:        [{ role: "user", content: prompt }],
-      temperature:     0.3,
-      max_tokens:      1500,
-      response_format: { type: "json_object" },
-    });
-
-    const rawContent = completion?.choices?.[0]?.message?.content;
-    let parsed = { gaps: [] };
-    if (rawContent) {
-      try { parsed = JSON.parse(rawContent); }
-      catch (e) { console.warn("Gap parse error:", e); }
+    let pipeline;
+    try {
+      pipeline = await generateWorkspaceGaps({ points: allChunks, completeJson });
+    } catch (err) {
+      console.warn("On-demand gap pipeline failed:", err.message);
+      return res.json([]);
     }
-
-    const gaps = parseGapResponse(parsed, excerpts);
+    const { gaps, screened } = pipeline;
     if (!gaps.length) return res.json([]);
+    console.log(
+      `📊 On-demand gaps: ${allChunks.length} chunks → ${gaps.length} candidates (screened=${screened})`
+    );
 
     // ── Store so future reloads are free ────────────────────────────────────
     const relatedPdfs = gapFilenames(gaps);
-
-    const records = gaps.map((gap) => ({
-      workspace_id: workspaceId,
-      gap_text: [gap.title, gap.description].filter(Boolean).join("\n\n"),
-      gap_type:     gap.type,
-      confidence:   gap.confidence,
-      related_pdfs: relatedPdfs,
-      evidence:     gap.evidence, // needs migration 002; dropped on older schemas
-    }));
+    const verification = screened ? "verified" : "unverified";
+    const records = gaps.map((gap) => toGapRecord(workspaceId, gap, relatedPdfs, verification));
 
     // Fire-and-forget — don't block the response on the insert
     (async () => {
-      let { error } = await supabase.from("research_gaps").insert(records);
-      if (error && /column|evidence/i.test(error.message ?? "")) {
-        const legacy = records.map(({ evidence: _dropped, ...row }) => row);
-        ({ error } = await supabase.from("research_gaps").insert(legacy));
-      }
-      if (error) console.warn("Could not store on-demand research gaps:", error.message);
+      const stored = await insertGapRecords(supabase, records);
+      if (!stored.ok) console.warn("Could not store on-demand research gaps:", stored.error?.message);
       else console.log(`✅ Stored ${records.length} on-demand gaps for workspace ${workspaceId}`);
     })();
 
@@ -298,6 +290,10 @@ router.get("/:id/research-gaps", clerkAuth, async (req, res) => {
       description: gap.description,
       type:        gap.type,
       confidence:  gap.confidence,
+      evidenceLevel: gap.evidenceLevel,
+      limitation:  gap.limitation || null,
+      reasoning:   gap.reasoning || null,
+      verification,
       evidence:    gap.evidence,
       citations:   evidenceCitations(gap, pdfNameMap, defaultCitations),
     })));
@@ -337,12 +333,12 @@ router.post("/:id/generate-abstract", clerkAuth, async (req, res) => {
       console.warn("Qdrant scroll failed for abstract:", e.message);
     }
  
-    // Use sampled context — not full dump
-    const contextText = sampleChunks(allChunks, 15, 500, 3000);
+    // Use sampled context (shared provenance sampler) — not full dump
+    const { contextText } = sampleExcerpts(allChunks, { sampleCount: 15, excerptLen: 500, maxContext: 3000 });
     const prompt      = buildAbstractPrompt(gapTitle, gapDescription, contextText, pdfMeta?.length || 0);
  
     const completion = await getAi().chat.completions.create({
-      model:       "llama-3.3-70b-versatile",
+      model:       "openai/gpt-oss-120b",
       messages:    [{ role: "user", content: prompt }],
       temperature: 0.5,
       max_tokens:  800,

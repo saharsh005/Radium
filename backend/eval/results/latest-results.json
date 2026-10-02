@@ -1,6 +1,6 @@
 {
   "tool": "radium-bench/1",
-  "timestamp": "2026-09-29T16:03:00.046Z",
+  "timestamp": "2026-10-01T15:34:52.693Z",
   "node": "v24.14.1",
   "environment": {
     "networkEgress": "unavailable (DNS fails; verified by probe)",
@@ -84,7 +84,7 @@
         "diversifyK": 12,
         "fallbackThreshold": 0.12
       },
-      "latencyMs": 0.35
+      "latencyMs": 0.49
     },
     "note": "Synthetic ordering numbers exercise production rerank+diversify code but are NOT production retrieval quality."
   },
@@ -101,7 +101,7 @@
           "verdict": "supported",
           "pass": true,
           "citationCoverage": 1,
-          "latencyMs": 2.02
+          "latencyMs": 2.2
         },
         {
           "name": "hallucinated-invalid-cite",
@@ -109,7 +109,7 @@
           "verdict": "needs-review",
           "pass": true,
           "citationCoverage": 0,
-          "latencyMs": 0.16
+          "latencyMs": 0.25
         },
         {
           "name": "refusal",
@@ -125,7 +125,7 @@
           "verdict": "needs-review",
           "pass": true,
           "citationCoverage": 0,
-          "latencyMs": 0.06
+          "latencyMs": 0.09
         }
       ]
     },
@@ -160,86 +160,86 @@
       "method": "in-process repeated calls to production functions; performance.now()",
       "classify12Qs": {
         "n": 50,
-        "mean": 0.169,
-        "p50": 0.137,
-        "p95": 0.322,
-        "min": 0.092,
-        "max": 0.394,
+        "mean": 0.182,
+        "p50": 0.184,
+        "p95": 0.293,
+        "min": 0.093,
+        "max": 0.358,
         "unit": "ms per 12-question batch"
       },
       "rerankPlusDiversify5": {
         "n": 50,
         "mean": 0.02,
-        "p50": 0.014,
-        "p95": 0.052,
+        "p50": 0.009,
+        "p95": 0.058,
         "min": 0.008,
-        "max": 0.179,
+        "max": 0.155,
         "unit": "ms per run over 5 candidates"
       },
       "verify6Claims": {
         "n": 30,
-        "mean": 0.236,
-        "p50": 0.161,
-        "p95": 0.427,
-        "min": 0.124,
-        "max": 1.444,
+        "mean": 0.413,
+        "p50": 0.323,
+        "p95": 0.723,
+        "min": 0.24,
+        "max": 2.003,
         "unit": "ms per 6-claim answer"
       },
       "chunking": {
         "section-aware": {
           "n": 11,
-          "mean": 1.177,
-          "p50": 0.789,
-          "p95": 4.596,
-          "min": 0.513,
-          "max": 4.596,
+          "mean": 1.321,
+          "p50": 1.295,
+          "p95": 2.28,
+          "min": 0.75,
+          "max": 2.28,
           "inputChars": 22368,
           "inputPages": 20,
           "chunksProduced": 40,
-          "charsPerSec": 19000000
+          "charsPerSec": 16900000
         },
         "paragraph": {
           "n": 11,
-          "mean": 0.253,
-          "p50": 0.228,
-          "p95": 0.351,
-          "min": 0.214,
-          "max": 0.351,
+          "mean": 0.641,
+          "p50": 0.622,
+          "p95": 0.786,
+          "min": 0.566,
+          "max": 0.786,
           "inputChars": 22368,
           "inputPages": 20,
           "chunksProduced": 24,
-          "charsPerSec": 88400000
+          "charsPerSec": 34900000
         },
         "fixed": {
           "n": 11,
-          "mean": 0.272,
-          "p50": 0.222,
-          "p95": 0.547,
-          "min": 0.197,
-          "max": 0.547,
+          "mean": 0.36,
+          "p50": 0.233,
+          "p95": 0.825,
+          "min": 0.178,
+          "max": 0.825,
           "inputChars": 22368,
           "inputPages": 20,
           "chunksProduced": 35,
-          "charsPerSec": 82200000
+          "charsPerSec": 62100000
         },
         "recursive": {
           "n": 11,
-          "mean": 0.204,
-          "p50": 0.181,
-          "p95": 0.287,
-          "min": 0.12,
-          "max": 0.287,
+          "mean": 0.21,
+          "p50": 0.177,
+          "p95": 0.333,
+          "min": 0.131,
+          "max": 0.333,
           "inputChars": 22368,
           "inputPages": 20,
           "chunksProduced": 31,
-          "charsPerSec": 110000000
+          "charsPerSec": 107000000
         }
       }
     },
     "embedding": {
       "status": "measured",
       "dim": 384,
-      "latencyMs": 246.08,
+      "latencyMs": 230.34,
       "method": "production getEmbedding(), single text, cold start included"
     }
   },
@@ -259,7 +259,7 @@
       "blocked429": 10,
       "other": 0,
       "enforced": true,
-      "wallMs": 250
+      "wallMs": 241
     }
   },
   "failed": {

@@ -13,7 +13,7 @@ reproducible evaluation harness.
 | DB + object storage | Supabase + `pdfs` bucket (`backend/utils/supabase.js`) |
 | Vectors | Qdrant, one collection per workspace: `workspace_{id}` |
 | Queue | Redis + BullMQ `pdf-queue` (`backend/queue/`) |
-| LLM | Groq `llama-3.3-70b-versatile` |
+| LLM | Groq `openai/gpt-oss-120b` |
 | Embeddings | Local Xenova `all-MiniLM-L6-v2` (384-dim, normalised) |
 
 ## Upload data flow
@@ -58,13 +58,26 @@ POST /chat (auth + ownership check on chat)
 → persist messages + structured rag_chat log → response
 ```
 
-## Research gaps
+## Research gaps (limitation-first)
 
-Qdrant sample → provenance-labelled excerpts `[E1 | file p.N | section]`
-→ LLM (evidence IDs mandatory) → `parseGapResponse` (drops unresolvable,
-confidence = resolved/claimed, measured) → `research_gaps` (+ `evidence`
-jsonb via migration `002_gap_evidence.sql`). Route serves stored rows or
-generates on demand with the same helpers (`rag/gaps.js`).
+```
+PDF → chunks → limitation-zone mining (cue + section scoring, no LLM)
+  → zone-prioritized excerpts → layered LLM gaps
+  → evidence resolution → contradiction screen (1 bounded call)
+  → store (verified) / reject (contradicted)
+```
+
+Qdrant sample → limitation-rich excerpts `[E1 | file p.N | section]`
+→ LLM walks limitation → gap → one-sentence inference check, with an
+evidence level per candidate (`EXPLICIT / STRONGLY_SUPPORTED /
+SUPPORTED_INFERENCE / SPECULATIVE`) → `parseGapResponse` drops
+unresolvable evidence and sorts speculative last → a second LLM pass
+rejects candidates the workspace evidence already addresses →
+`research_gaps` (+ `evidence` jsonb via migration 002, chain columns via
+migration 003) with progressive insert fallback. Worker and on-demand
+route share `generateWorkspaceGaps()` (`rag/gaps.js`), so both paths
+behave identically. The UI renders the chain (limitation → reasoning →
+evidence → level → screened state), never a bare "Gap: X".
 
 ## Internet research (`POST /chat/internet`)
 

@@ -21,6 +21,16 @@ const GAP_COLORS = {
   'POPULATION GAP':     '#f472b6',
 };
 
+// Evidence levels (backend EVIDENCE_LEVELS): how strongly the workspace
+// supports the limitation → gap inference. Speculative items are grouped
+// separately as "requires verification", never presented as findings.
+const LEVEL_META = {
+  EXPLICIT:            { label: 'Explicit', warn: false },
+  STRONGLY_SUPPORTED:  { label: 'Strongly supported', warn: false },
+  SUPPORTED_INFERENCE: { label: 'Supported inference', warn: false },
+  SPECULATIVE:         { label: 'Requires verification', warn: true },
+};
+
 // Document processing lifecycle (mirrors backend migration 001)
 const STATUS_META = {
   QUEUED:            { color: '#8a8680', label: 'Queued for indexing' },
@@ -182,7 +192,31 @@ export default function WorkspaceChatPage() {
   useEffect(() => { loadMessages(); }, [loadMessages]);
   useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [messages]);
 
-  // ── Gap toggle + inline abstract fetch ───────────────────────────────────
+  // ── Gap expansion + inline abstract fetch (with retry on failure) ──────
+  const fetchAbstract = useCallback(async (gap) => {
+    const id = gap.id;
+    setGapAbstracts(prev => ({ ...prev, [id]: { text: null, loading: true, error: null } }));
+    try {
+      const token = await getToken();
+      const res   = await fetch(`${API}/workspace/${workspaceId}/generate-abstract`, {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body:    JSON.stringify({ gapTitle: gap.title, gapDescription: gap.description }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data?.error || `Request failed (${res.status})`);
+      setGapAbstracts(prev => ({
+        ...prev,
+        [id]: { text: data.abstract || 'No abstract generated.', loading: false, error: null },
+      }));
+    } catch (err) {
+      setGapAbstracts(prev => ({
+        ...prev,
+        [id]: { text: null, loading: false, error: err?.message || 'Could not generate the abstract.' },
+      }));
+    }
+  }, [workspaceId, getToken]);
+
   const toggleGap = useCallback(async (gap) => {
     const id = gap.id;
 
@@ -194,30 +228,11 @@ export default function WorkspaceChatPage() {
 
     setExpandedGapId(id);
 
-    // Already fetched — nothing to do
-    if (gapAbstracts[id]?.text) return;
+    // Already fetched (or loading) — nothing to do; errors can be retried
+    if (gapAbstracts[id]?.text || gapAbstracts[id]?.loading) return;
 
-    // Start loading
-    setGapAbstracts(prev => ({ ...prev, [id]: { text: null, loading: true } }));
-    try {
-      const token = await getToken();
-      const res   = await fetch(`${API}/workspace/${workspaceId}/generate-abstract`, {
-        method:  'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-        body:    JSON.stringify({ gapTitle: gap.title, gapDescription: gap.description }),
-      });
-      const data = await res.json();
-      setGapAbstracts(prev => ({
-        ...prev,
-        [id]: { text: data.abstract || 'No abstract generated.', loading: false },
-      }));
-    } catch {
-      setGapAbstracts(prev => ({
-        ...prev,
-        [id]: { text: '⚠️ Failed to generate abstract.', loading: false },
-      }));
-    }
-  }, [expandedGapId, gapAbstracts, workspaceId, getToken]);
+    await fetchAbstract(gap);
+  }, [expandedGapId, gapAbstracts, fetchAbstract]);
 
   // ── Actions ───────────────────────────────────────────────────────────────
   const sendMessage = async () => {
@@ -969,20 +984,35 @@ export default function WorkspaceChatPage() {
 
                 {/* Header */}
                 <div style={{
-                  display: 'flex', alignItems: 'center', padding: '11px 14px',
+                  display: 'flex', alignItems: 'center', padding: '12px 14px 10px',
                   borderBottom: `1px solid ${th.border}`,
-                  background: th.bg2, flexShrink: 0,
+                  background: th.bg2, flexShrink: 0, gap: 8,
                 }}>
-                  <Sparkles size={12} style={{ color: th.accent, marginRight: 8 }} />
-                  <span style={{ fontSize: 13, fontWeight: 600, flex: 1, fontFamily: "'DM Serif Display', serif" }}>
-                    Research Gaps
-                  </span>
-                  <button className="icon-btn" style={{ marginRight: 6 }} onClick={loadGaps} disabled={loadingGaps} title="Refresh">
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                      <span style={{ fontSize: 13, fontWeight: 600, fontFamily: "'DM Serif Display', serif" }}>
+                        Research gaps
+                      </span>
+                      {researchGaps.length > 0 && (
+                        <span style={{
+                          fontSize: 10, fontWeight: 600, color: th.textMuted,
+                          background: th.bg3, border: `1px solid ${th.border}`,
+                          borderRadius: 10, padding: '1px 7px',
+                        }}>
+                          {researchGaps.length}
+                        </span>
+                      )}
+                    </div>
+                    <div style={{ fontSize: 10, color: th.textMuted, fontWeight: 300, marginTop: 2 }}>
+                      Evidence-backed candidates · select one for a draft abstract
+                    </div>
+                  </div>
+                  <button className="icon-btn" onClick={loadGaps} disabled={loadingGaps} title="Refresh analysis">
                     {loadingGaps
                       ? <Loader2 size={12} style={{ animation: 'spin 0.8s linear infinite' }} />
                       : <BarChart2 size={12} />}
                   </button>
-                  <button className="icon-btn" onClick={() => { setShowGaps(false); setExpandedGapId(null); }}>
+                  <button className="icon-btn" onClick={() => { setShowGaps(false); setExpandedGapId(null); }} title="Close panel">
                     <X size={13} />
                   </button>
                 </div>
@@ -1013,24 +1043,86 @@ export default function WorkspaceChatPage() {
                     const col      = GAP_COLORS[gap.type] || th.accent;
                     const isOpen   = expandedGapId === gap.id;
                     const abstract = gapAbstracts[gap.id];
+                    const evidence = Array.isArray(gap.evidence) ? gap.evidence : [];
+                    const confidence = typeof gap.confidence === 'number' && gap.confidence > 0
+                      ? Math.round(gap.confidence * 100)
+                      : null;
+                    const levelMeta = LEVEL_META[gap.evidenceLevel] || null;
+                    const isSpec = gap.evidenceLevel === 'SPECULATIVE';
+                    const showSpecDivider = isSpec && (i === 0 || researchGaps[i - 1]?.evidenceLevel !== 'SPECULATIVE');
 
                     return (
+                      <div key={gap.id || i} style={{ display: 'flex', flexDirection: 'column', gap: 0 }}>
+                        {showSpecDivider && (
+                          <div style={{
+                            display: 'flex', alignItems: 'center', gap: 8, margin: '6px 0 2px',
+                          }}>
+                            <div style={{ flex: 1, height: 1, background: th.border }} />
+                            <span style={{ fontSize: 9, fontWeight: 600, color: th.textMuted, letterSpacing: '0.08em', textTransform: 'uppercase' }}>
+                              Requires verification
+                            </span>
+                            <div style={{ flex: 1, height: 1, background: th.border }} />
+                          </div>
+                        )}
                       <div
-                        key={gap.id || i}
                         className={`gap-card${isOpen ? ' expanded' : ''}`}
                         onClick={() => toggleGap(gap)}
                       >
-                        {/* Type + chevron row */}
+                        {/* Index + type + confidence row */}
                         <div style={{
-                          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-                          marginBottom: 5,
+                          display: 'flex', alignItems: 'center', gap: 7,
+                          marginBottom: 6,
                         }}>
-                          <span style={{ fontSize: 9, fontWeight: 700, color: col, letterSpacing: '0.1em', textTransform: 'uppercase' }}>
-                            {gap.type || 'RESEARCH GAP'}
+                          <span style={{
+                            fontSize: 10, fontWeight: 600, color: th.textMuted,
+                            fontVariantNumeric: 'tabular-nums',
+                          }}>
+                            {String(i + 1).padStart(2, '0')}
                           </span>
+                          <span style={{ width: 6, height: 6, borderRadius: '50%', background: col, flexShrink: 0 }} />
+                          <span style={{ fontSize: 9, fontWeight: 600, color: th.textSub, letterSpacing: '0.08em', textTransform: 'uppercase', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                            {(gap.type || 'RESEARCH GAP').toLowerCase().replace(/\b\w/g, c => c.toUpperCase())}
+                          </span>
+                          {levelMeta && (
+                            <span
+                              title={isSpec ? 'Insufficient workspace evidence — treat as a lead, not a finding' : 'How strongly the workspace evidence supports this gap'}
+                              style={{
+                                fontSize: 9, fontWeight: 600, letterSpacing: '0.04em',
+                                color: isSpec ? '#e8a13d' : th.textSub,
+                                background: th.bg3,
+                                border: isSpec ? '1px dashed rgba(232,161,61,0.5)' : `1px solid ${th.border}`,
+                                borderRadius: 4, padding: '1px 6px', flexShrink: 0, whiteSpace: 'nowrap',
+                              }}
+                            >
+                              {levelMeta.label}
+                            </span>
+                          )}
+                          {gap.verification === 'verified' && (
+                            <span
+                              title="Checked against the workspace: no contradicting evidence found"
+                              style={{ fontSize: 9, fontWeight: 500, color: '#4ade80', background: 'rgba(74,222,128,0.07)', border: '1px solid rgba(74,222,128,0.25)', borderRadius: 4, padding: '1px 6px', flexShrink: 0, whiteSpace: 'nowrap' }}
+                            >
+                              Screened
+                            </span>
+                          )}
+                          {confidence !== null ? (
+                            <span
+                              title="Share of the proposed supporting references that resolve to real document excerpts"
+                              style={{ fontSize: 9, fontWeight: 600, color: th.textSub, background: th.bg3, border: `1px solid ${th.border}`, borderRadius: 4, padding: '1px 6px', fontVariantNumeric: 'tabular-nums', flexShrink: 0 }}
+                            >
+                              Evidence {confidence}%
+                            </span>
+                          ) : (
+                            <span
+                              title="Stored before evidence scoring — refresh to re-analyse"
+                              style={{ fontSize: 9, fontWeight: 500, color: th.textMuted, border: `1px dashed ${th.border}`, borderRadius: 4, padding: '1px 6px', flexShrink: 0 }}
+                            >
+                              Unscored
+                            </span>
+                          )}
                           <span style={{
                             color: th.textMuted, fontSize: 12, lineHeight: 1,
-                            display: 'inline-block',
+                            display: 'inline-block', flexShrink: 0,
                             transform: isOpen ? 'rotate(180deg)' : 'rotate(0deg)',
                             transition: 'transform 0.2s',
                           }}>
@@ -1041,7 +1133,7 @@ export default function WorkspaceChatPage() {
                         {/* Title */}
                         <div style={{
                           fontSize: 13, fontWeight: 500, color: th.text,
-                          lineHeight: 1.4, fontFamily: "'DM Serif Display', serif",
+                          lineHeight: 1.45, fontFamily: "'DM Serif Display', serif",
                           marginBottom: gap.description ? 6 : 0,
                         }}>
                           {gap.title}
@@ -1049,12 +1141,41 @@ export default function WorkspaceChatPage() {
 
                         {/* Description — always visible */}
                         {gap.description && (
-                          <div style={{ fontSize: 12, color: th.textSub, lineHeight: 1.6, fontWeight: 300 }}>
+                          <div style={{ fontSize: 12, color: th.textSub, lineHeight: 1.65, fontWeight: 300 }}>
                             {gap.description}
                           </div>
                         )}
 
-                        {/* Citation chips */}
+                        {/* Unresolved limitation — the chain this gap follows from */}
+                        {gap.limitation && (
+                          <div style={{
+                            marginTop: 7, padding: '7px 9px',
+                            background: th.bg3, borderLeft: `2px solid ${col}`,
+                            borderRadius: '0 6px 6px 0',
+                            fontSize: 11, color: th.textSub, lineHeight: 1.6, fontWeight: 300,
+                          }}>
+                            <span style={{ fontWeight: 600, color: th.text, fontSize: 10 }}>Unresolved limitation · </span>
+                            {gap.limitation}
+                          </div>
+                        )}
+
+                        {/* Evidence preview */}
+                        {evidence.length > 0 && (
+                          <div style={{
+                            marginTop: 9, paddingTop: 8,
+                            borderTop: `1px solid ${th.border}`,
+                            fontSize: 11, color: th.textMuted, lineHeight: 1.55, fontWeight: 300,
+                          }}>
+                            <span style={{ fontWeight: 600, color: th.textSub }}>Evidence · </span>
+                            {evidence[0].filename}{evidence[0].page ? `, p. ${evidence[0].page}` : ''}
+                            {evidence[0].quote ? ` — “${evidence[0].quote.slice(0, 110)}${evidence[0].quote.length > 110 ? '…' : ''}”` : ''}
+                            {evidence.length > 1 && (
+                              <span style={{ color: th.textSub }}> (+{evidence.length - 1} more)</span>
+                            )}
+                          </div>
+                        )}
+
+                        {/* Source files */}
                         {gap.citations?.length > 0 && (
                           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginTop: 8 }}>
                             {gap.citations.map((c, ci) => (
@@ -1072,24 +1193,82 @@ export default function WorkspaceChatPage() {
                           </div>
                         )}
 
-                        {/* Expanded: inline abstract */}
+                        {/* Expanded: full evidence + draft abstract */}
                         {isOpen && (
                           <div
                             style={{ marginTop: 12, borderTop: `1px solid ${th.border}`, paddingTop: 12, animation: 'fadeUp 0.18s ease both' }}
                             onClick={e => e.stopPropagation()}
                           >
+                            {/* Why this follows from the limitation */}
+                            {gap.reasoning && (
+                              <div style={{
+                                marginBottom: 12, fontSize: 11, color: th.textSub,
+                                lineHeight: 1.6, fontWeight: 300,
+                              }}>
+                                <span style={{ fontWeight: 600, color: th.text, fontSize: 10 }}>Why this follows · </span>
+                                {gap.reasoning}
+                              </div>
+                            )}
+                            {evidence.length > 1 && (
+                              <div style={{ marginBottom: 12 }}>
+                                <div style={{
+                                  fontSize: 10, fontWeight: 700, color: th.textSub,
+                                  letterSpacing: '0.1em', textTransform: 'uppercase',
+                                  marginBottom: 7,
+                                }}>
+                                  Supporting evidence
+                                </div>
+                                <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                                  {evidence.map((e, ei) => (
+                                    <div key={ei} style={{
+                                      background: th.bg3, border: `1px solid ${th.border}`,
+                                      borderRadius: 7, padding: '7px 9px',
+                                    }}>
+                                      <div style={{ fontSize: 10, fontWeight: 600, color: th.textSub, marginBottom: 3 }}>
+                                        {e.filename}{e.page ? ` · p. ${e.page}` : ''}{e.section ? ` · ${e.section}` : ''}
+                                      </div>
+                                      {e.quote && (
+                                        <div style={{ fontSize: 11, color: th.textMuted, lineHeight: 1.6, fontWeight: 300, fontStyle: 'italic' }}>
+                                          “{e.quote.slice(0, 220)}{e.quote.length > 220 ? '…' : ''}”
+                                        </div>
+                                      )}
+                                    </div>
+                                  ))}
+                                </div>
+                              </div>
+                            )}
+
                             <div style={{
                               fontSize: 10, fontWeight: 700, color: th.accent,
                               letterSpacing: '0.1em', textTransform: 'uppercase',
                               marginBottom: 8, display: 'flex', alignItems: 'center', gap: 5,
                             }}>
-                              <Sparkles size={9} /> Generated Abstract
+                              <FileText size={9} /> Draft abstract
                             </div>
 
                             {abstract?.loading ? (
                               <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 0' }}>
                                 <Loader2 size={13} style={{ color: th.accent, animation: 'spin 0.8s linear infinite', flexShrink: 0 }} />
-                                <span style={{ fontSize: 11, color: th.textMuted, fontWeight: 300 }}>Synthesising abstract…</span>
+                                <span style={{ fontSize: 11, color: th.textMuted, fontWeight: 300 }}>Drafting abstract from your documents…</span>
+                              </div>
+                            ) : abstract?.error ? (
+                              <div style={{
+                                background: 'rgba(232,93,93,0.06)', border: '1px solid rgba(232,93,93,0.25)',
+                                borderRadius: 7, padding: '9px 11px',
+                              }}>
+                                <div style={{ fontSize: 12, color: '#e85d5d', marginBottom: 7 }}>
+                                  Could not generate the abstract{abstract.error && abstract.error !== 'Could not generate the abstract.' ? `: ${abstract.error}` : '.'}
+                                </div>
+                                <button
+                                  onClick={() => fetchAbstract(gap)}
+                                  style={{
+                                    background: th.bg3, border: `1px solid ${th.border}`,
+                                    color: th.text, borderRadius: 6, padding: '5px 12px',
+                                    fontSize: 11, cursor: 'pointer', fontWeight: 500,
+                                  }}
+                                >
+                                  Try again
+                                </button>
                               </div>
                             ) : abstract?.text ? (
                               <>
@@ -1097,14 +1276,11 @@ export default function WorkspaceChatPage() {
                                   {abstract.text}
                                 </div>
                                 <div style={{
-                                  marginTop: 10,
-                                  background: th.accentDim, border: `1px solid ${th.accentBdr}`,
-                                  borderRadius: 7, padding: '7px 10px',
-                                  fontSize: 10, color: th.accent,
-                                  display: 'flex', alignItems: 'flex-start', gap: 5,
+                                  marginTop: 10, paddingTop: 8,
+                                  borderTop: `1px solid ${th.border}`,
+                                  fontSize: 10, color: th.textMuted, fontWeight: 300,
                                 }}>
-                                  <Sparkles size={9} style={{ flexShrink: 0, marginTop: 1 }} />
-                                  Based on {workspacePdfs.length} document{workspacePdfs.length !== 1 ? 's' : ''} in this workspace.
+                                  Drafted from {workspacePdfs.length} document{workspacePdfs.length !== 1 ? 's' : ''} in this workspace · review before use
                                 </div>
                               </>
                             ) : (
@@ -1114,6 +1290,7 @@ export default function WorkspaceChatPage() {
                             )}
                           </div>
                         )}
+                      </div>
                       </div>
                     );
                   })}
